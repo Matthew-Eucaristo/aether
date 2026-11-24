@@ -417,3 +417,82 @@ fn missiles_explode_with_splash_damage() {
         .count();
     assert_eq!(left, 0, "missile, fireball and sparks were cleaned up");
 }
+
+#[test]
+fn bodies_walk_on_the_terrain_and_bullets_hit_hills() {
+    let terrain = aether_kernel::Terrain {
+        seed: 3,
+        relief: 30,
+        scale: 60,
+        plaza: 0,
+    };
+    let mut k = Kernel::new(
+        Law {
+            terrain,
+            ..Law::default()
+        },
+        9,
+    );
+    let realm = install(&mut k, Actor::Admin, REALM, vec![]);
+    let hub = k.state().capsules[&realm].self_entity;
+    step(&mut k, vec![(player("ana"), signal(hub, "join", 0.0))]);
+    let ana = avatar_of(&k, "ana");
+    step(
+        &mut k,
+        vec![
+            (player("ana"), signal(ana, "mx", 1.0)),
+            (player("ana"), signal(ana, "run", 1.0)),
+        ],
+    );
+    let mut heights = Vec::new();
+    for _ in 0..60 {
+        step(&mut k, vec![]);
+        let (x, y, z) = (
+            num(&k, ana, "pos.x"),
+            num(&k, ana, "pos.y"),
+            num(&k, ana, "pos.z"),
+        );
+        let ground = aether_kernel::height(&terrain, x, y);
+        assert!(
+            z >= ground + 0.9 - 1e-9,
+            "never below the ground: z {z} ground {ground}"
+        );
+        if entry(&k, realm, ana)[14] == 1.0 {
+            assert_eq!(z, ground + 0.9, "standing bodies rest on the ground");
+        }
+        heights.push(ground);
+    }
+    let (lo, hi) = heights
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(lo, hi), h| (lo.min(*h), hi.max(*h)));
+    assert!(hi - lo > 1.0, "the walk crossed real hills: {lo}..{hi}");
+}
+
+#[test]
+fn terrain_heights_are_pinned_bit_for_bit() {
+    let t = aether_kernel::Terrain {
+        seed: 12345,
+        relief: 40,
+        scale: 200,
+        plaza: 48,
+    };
+    let at = |x: f64, y: f64| aether_kernel::height(&t, x, y).to_bits();
+    assert_eq!(
+        aether_kernel::height(&t, 0.0, 0.0),
+        0.0,
+        "the plaza is flat"
+    );
+    assert_eq!(
+        [
+            at(130.5, -77.25),
+            at(-1000.0, 2500.75),
+            at(98765.4321, -12345.678)
+        ],
+        [
+            4620156622863457034,
+            4624851803339691145,
+            4608166634807022752
+        ],
+        "pinned values: update only together with the viewer's copy of the terrain function"
+    );
+}

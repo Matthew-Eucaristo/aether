@@ -2,6 +2,7 @@ use aether_world::Usage;
 use serde::{Deserialize, Serialize};
 
 use crate::capsule::Budget;
+use crate::terrain::Terrain;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Law {
@@ -15,6 +16,7 @@ pub struct Law {
     pub region_fuel_per_tick: u64,
     pub player_quota: Usage,
     pub ceiling: Budget,
+    pub terrain: Terrain,
 }
 
 impl Default for Law {
@@ -38,6 +40,7 @@ impl Default for Law {
                 writes_per_tick: 1024,
                 spawns_per_tick: 16,
             },
+            terrain: Terrain::default(),
         }
     }
 }

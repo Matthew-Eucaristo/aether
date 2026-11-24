@@ -10,6 +10,8 @@
   (import "world" "owner" (func $owner (param i64 i32 i32) (result i32)))
   (import "world" "installer" (func $installer (param i64 i32 i32) (result i32)))
   (import "world" "find" (func $find (param i32 i32 i64) (result i64)))
+  (import "world" "near" (func $near (param i64 f64 f64 f64 i64) (result i64)))
+  (import "world" "ground" (func $ground (param f64 f64) (result f64)))
   (import "world" "set_num" (func $set (param i32 i32 i32 f64)))
   (import "world" "set_nums" (func $set_nums (param i32 i32 i32 i32 i32)))
   (import "world" "set_text" (func $set_text (param i32 i32 i32 i32 i32)))
@@ -237,7 +239,8 @@
     (local.set $r (f64.add (f64.const 9) (f64.mul (call $rand) (f64.const 5))))
     (f64.store offset=56 (local.get $e) (f64.mul (local.get $r) (call $cos (local.get $a))))
     (f64.store offset=64 (local.get $e) (f64.mul (local.get $r) (call $sin (local.get $a))))
-    (f64.store offset=72 (local.get $e) (f64.const 0.9))
+    (f64.store offset=72 (local.get $e)
+      (f64.add (call $ground (f64.load offset=56 (local.get $e)) (f64.load offset=64 (local.get $e))) (f64.const 0.9)))
     (f64.store offset=80 (local.get $e) (f64.const 0))
     (f64.store offset=24 (local.get $e) (f64.const 100))
     (f64.store offset=128 (local.get $e) (f64.const 1)))
@@ -364,13 +367,14 @@
       (then (return (call $get_bool (local.get $b) (i32.const 320) (i32.const 5)))))
     (i32.eqz (local.get $kind)))
 
-  (func $solids
+  (func $solids (param $dim i64) (param $x f64) (param $y f64) (param $r f64)
     (local $b i64) (local $q i32) (local $k i32) (local $size f64) (local $full f64)
     (local $dx f64) (local $dy f64) (local $dz f64) (local $h f64)
+    (global.set $ns (i32.const 0))
     (local.set $b (i64.const -1))
     (block $done
       (loop $next
-        (local.set $b (call $find (i32.const 152) (i32.const 5) (local.get $b)))
+        (local.set $b (call $near (local.get $dim) (local.get $x) (local.get $y) (local.get $r) (local.get $b)))
         (br_if $done (i64.lt_s (local.get $b) (i64.const 0)))
         (br_if $done (i32.ge_u (global.get $ns) (global.get $MAXS)))
         (local.set $k (call $shapekind (local.get $b)))
@@ -485,11 +489,14 @@
     (select (local.get $lo) (f64.const 2) (f64.le (local.get $lo) (local.get $hi))))
 
   (func $wall (param $sx f64) (param $sy f64) (param $sz f64) (param $vx f64) (param $vy f64) (param $vz f64) (result f64)
-    (local $best f64) (local $i i32)
+    (local $best f64) (local $i i32) (local $a f64) (local $b f64)
     (local.set $best (f64.const 2))
-    (if (f64.lt (f64.add (local.get $sz) (local.get $vz)) (f64.const 0))
-      (then (local.set $best (select (f64.div (local.get $sz) (f64.neg (local.get $vz))) (f64.const 0)
-        (f64.gt (local.get $sz) (f64.const 0))))))
+    (local.set $a (f64.sub (local.get $sz) (call $ground (local.get $sx) (local.get $sy))))
+    (local.set $b (f64.sub (f64.add (local.get $sz) (local.get $vz))
+      (call $ground (f64.add (local.get $sx) (local.get $vx)) (f64.add (local.get $sy) (local.get $vy)))))
+    (if (f64.lt (local.get $b) (f64.const 0))
+      (then (local.set $best (select (f64.div (local.get $a) (f64.sub (local.get $a) (local.get $b))) (f64.const 0)
+        (f64.gt (local.get $a) (f64.const 0))))))
     (block $done
       (loop $each
         (br_if $done (i32.ge_u (local.get $i) (global.get $ns)))
@@ -504,7 +511,7 @@
     (local $c i32) (local $q i32) (local $k i32)
     (local $dx f64) (local $dy f64) (local $lx f64) (local $ly f64) (local $cx f64) (local $cy f64)
     (local $nx f64) (local $ny f64) (local $d f64) (local $top f64) (local $bot f64) (local $r f64) (local $push f64)
-    (global.set $bg (f64.const 0.9))
+    (global.set $bg (f64.add (call $ground (global.get $bx) (global.get $by)) (f64.const 0.9)))
     (block $done
       (loop $each
         (br_if $done (i32.ge_u (local.get $c) (local.get $nc)))
@@ -594,8 +601,9 @@
         (local.set $mx (f64.mul (f64.load offset=88 (local.get $e)) (local.get $speed)))
         (local.set $my (f64.mul (f64.load offset=96 (local.get $e)) (local.get $speed)))))
     (local.set $len (f64.sqrt (f64.add (f64.mul (local.get $mx) (local.get $mx)) (f64.mul (local.get $my) (local.get $my)))))
+    (call $solids (i64.const 0) (global.get $bx) (global.get $by) (f64.add (local.get $len) (f64.const 24)))
     (block $gathered
-      (loop $near
+      (loop $close
         (br_if $gathered (i32.ge_u (local.get $j) (global.get $ns)))
         (local.set $q (call $solid (local.get $j)))
         (local.set $dx (f64.sub (global.get $bx) (f64.load (local.get $q))))
@@ -611,7 +619,7 @@
             (i32.store (i32.add (global.get $NEAR) (i32.shl (local.get $nc) (i32.const 2))) (local.get $j))
             (local.set $nc (i32.add (local.get $nc) (i32.const 1)))))
         (local.set $j (i32.add (local.get $j) (i32.const 1)))
-        (br $near)))
+        (br $close)))
     (local.set $steps (i32.add (i32.trunc_sat_f64_u (f64.div (local.get $len) (f64.const 0.15))) (i32.const 1)))
     (loop $sub
       (global.set $bx (f64.add (global.get $bx) (f64.div (local.get $mx) (f64.convert_i32_u (local.get $steps)))))
@@ -628,8 +636,8 @@
         (local.set $z (global.get $bg))
         (local.set $vz (f64.const 0))
         (f64.store offset=112 (local.get $e) (f64.const 1))))
-    (global.set $bx (call $clamp (global.get $bx) (f64.const -60) (f64.const 60)))
-    (global.set $by (call $clamp (global.get $by) (f64.const -60) (f64.const 60)))
+    (global.set $bx (call $clamp (global.get $bx) (f64.const -1000000) (f64.const 1000000)))
+    (global.set $by (call $clamp (global.get $by) (f64.const -1000000) (f64.const 1000000)))
     (f64.store offset=80 (local.get $e) (local.get $vz))
     (if (i32.or (i32.or (f64.ne (global.get $bx) (f64.load offset=56 (local.get $e)))
                         (f64.ne (global.get $by) (f64.load offset=64 (local.get $e))))
@@ -862,6 +870,10 @@
                 (local.set $i (i32.add (local.get $i) (i32.const 1)))
                 (br $each)))
             (local.set $victim (f64.const -1))
+            (call $solids (i64.const 0)
+              (f64.add (local.get $sx) (f64.mul (local.get $vx) (f64.const 0.5)))
+              (f64.add (local.get $sy) (f64.mul (local.get $vy) (f64.const 0.5)))
+              (f64.add (f64.const 24) (f64.mul (f64.sqrt (local.get $dd)) (f64.const 0.5))))
             (local.set $tw (call $wall (local.get $sx) (local.get $sy) (local.get $sz) (local.get $vx) (local.get $vy) (local.get $vz)))
             (if (i32.and (i32.ge_s (local.get $bi) (i32.const 0)) (f64.le (local.get $tw) (local.get $best)))
               (then (local.set $bi (i32.const -1))))
@@ -971,7 +983,6 @@
         (global.set $board (i32.const 1))))
     (global.set $n (i32.div_u (call $nums (global.get $me) (i32.const 128) (i32.const 6) (global.get $ROSTER) (i32.const 640)) (global.get $FIELDS)))
     (call $ammo)
-    (call $solids)
     (call $join)
     (block $done
       (loop $each

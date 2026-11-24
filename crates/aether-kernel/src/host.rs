@@ -16,6 +16,7 @@ const COST_SPAWN: u64 = 1_000;
 const COST_DESPAWN: u64 = 200;
 const COST_LOG: u64 = 10;
 const COST_MATH: u64 = 20;
+const COST_GROUND: u64 = 100;
 
 type Unary = fn(f64) -> f64;
 type Binary = fn(f64, f64) -> f64;
@@ -36,6 +37,7 @@ pub(crate) struct HostState {
     pub installers: Arc<BTreeMap<CapsuleId, String>>,
     pub emitted: Vec<Signal>,
     pub limits: StoreLimits,
+    pub terrain: crate::terrain::Terrain,
 }
 
 impl Default for HostState {
@@ -58,6 +60,7 @@ impl Default for HostState {
             installers: Arc::new(BTreeMap::new()),
             emitted: Vec::new(),
             limits: wasmtime::StoreLimitsBuilder::new().build(),
+            terrain: crate::terrain::Terrain::default(),
         }
     }
 }
@@ -506,6 +509,15 @@ pub(crate) fn linker(engine: &Engine) -> wasmtime::Result<Linker<HostState>> {
             let (found, examined) = s.txn.find(&s.world, &key, after);
             charge(&mut c, examined)?;
             Ok(found.map_or(-1, id_to_i64))
+        },
+    )?;
+
+    l.func_wrap(
+        "world",
+        "ground",
+        |mut c: Caller<'_, HostState>, x: f64, y: f64| -> wasmtime::Result<f64> {
+            charge(&mut c, COST_GROUND)?;
+            Ok(crate::terrain::height(&c.data().terrain, x, y))
         },
     )?;
 

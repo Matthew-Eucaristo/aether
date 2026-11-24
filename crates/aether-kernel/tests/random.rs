@@ -102,6 +102,12 @@ fn law(rng: &mut Rng) -> Law {
             bytes: *rng.pick(&[100, 2_000, 512 << 10]),
         },
         ceiling: budget(rng),
+        terrain: aether_kernel::Terrain {
+            seed: *rng.pick(&[0, 7, u32::MAX]),
+            relief: *rng.pick(&[0, 30, 2_000]),
+            scale: *rng.pick(&[0, 1, 200]),
+            plaza: *rng.pick(&[0, 48]),
+        },
     }
 }
 

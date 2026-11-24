@@ -73,6 +73,7 @@ impl Canon for Law {
             region_fuel_per_tick,
             player_quota,
             ceiling,
+            terrain,
         } = self;
         max_entities.feed(h);
         max_capsules.feed(h);
@@ -84,6 +85,22 @@ impl Canon for Law {
         region_fuel_per_tick.feed(h);
         player_quota.feed(h);
         ceiling.feed(h);
+        terrain.feed(h);
+    }
+}
+
+impl Canon for crate::terrain::Terrain {
+    fn feed(&self, h: &mut Hasher) {
+        let crate::terrain::Terrain {
+            seed,
+            relief,
+            scale,
+            plaza,
+        } = self;
+        seed.feed(h);
+        relief.feed(h);
+        scale.feed(h);
+        plaza.feed(h);
     }
 }
 

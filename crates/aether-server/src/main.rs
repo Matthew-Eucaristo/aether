@@ -579,7 +579,19 @@ async fn main() {
     let store = if dir.join("snapshot.json").exists() {
         Store::open(&dir)
     } else {
-        Store::create(&dir, Law::default(), random_u64())
+        Store::create(
+            &dir,
+            Law {
+                terrain: aether_kernel::Terrain {
+                    seed: random_u64() as u32,
+                    relief: 24,
+                    scale: 180,
+                    plaza: 40,
+                },
+                ..Law::default()
+            },
+            random_u64(),
+        )
     }
     .unwrap_or_else(|e| panic!("cannot open the world in {}: {e}", dir.display()));
     println!(

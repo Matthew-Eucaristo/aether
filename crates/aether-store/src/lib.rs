@@ -172,6 +172,9 @@ fn upgrade_snapshot(json: &mut serde_json::Value, from: &str) -> Result<(), Stri
         .ok_or("the snapshot has no law")?;
     law.entry("region_fuel_per_tick")
         .or_insert_with(|| Law::default().region_fuel_per_tick.into());
+    law.entry("terrain").or_insert_with(|| {
+        serde_json::to_value(Law::default().terrain).expect("terrain serializes")
+    });
     Ok(())
 }
 

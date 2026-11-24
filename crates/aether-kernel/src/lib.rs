@@ -8,6 +8,7 @@ mod law;
 mod meter;
 mod runtime;
 mod signal;
+mod terrain;
 
 pub use blob::{BlobHash, Blobs};
 pub use capsule::{Budget, Cap, Capsule, Grant, Status};
@@ -18,3 +19,4 @@ pub use kernel::{
 };
 pub use law::Law;
 pub use signal::{Sender, Signal};
+pub use terrain::{Terrain, height};

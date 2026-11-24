@@ -8,7 +8,7 @@ pub const GUIDE: &str = concat!(
 - Time advances in ticks, ten per second. Each tick the world first applies inputs from people, then runs every active capsule once, in capsule id order. Later capsules see what earlier capsules wrote in the same tick.
 - Everything is deterministic: the same history always produces the same world, so there is no clock, no I/O and no randomness except the world's own random() call.
 - A capsule is stateless. A fresh instance is created every tick, so locals, globals and linear memory start from scratch each time. Anything that must survive to the next tick has to be stored in components, normally on the capsule's own entity.
-- The renderer reads these conventions: pos.x and pos.y place an entity on the ground plane, pos.z is its height, one unit is about one metre, and the view shows roughly -20 to 20. color is a text "#rrggbb". size is the radius (default 0.28). An entity without pos.x is invisible state.
+- The renderer reads these conventions: pos.x and pos.y place an entity on the map, pos.z is its height above sea level, one unit is about one metre. The ground is terrain: read its height with ground(x, y); the area within the law's terrain.plaza metres of 0, 0 is flat at height 0. color is a text "#rrggbb". size is the radius (default 0.28). An entity without pos.x is invisible state.
 - A number array component named points is drawn as particles: it holds x, y, z triples relative to the entity's position, each drawn with the entity's size and color. Thousands of particles in one array are cheap; thousands of separate entities are not.
 - shape is "sphere" (default), "box" or "cylinder". A sphere's size is its radius; a box or cylinder spans scale.x, scale.y and scale.z metres (cylinders stand along z). rot.x, rot.y and rot.z rotate it in radians about its centre, so a door that swings on a hinge must move its centre as well as its rot.z.
 - dir.x, dir.y and dir.z point an entity along a direction instead of rot: a box or sphere lays its x axis (its scale.x length) along it, a cylinder its axis. Use it for guns, missiles, arrows and anything that faces where it moves.
@@ -69,6 +69,7 @@ Reads (public, take an entity id as i64):
   (func $get_nums (param i64 i32 i32 i32 i32) (result i32))  id, key ptr, key len, buffer ptr, max count -> array length; copies the f64s (little endian) only when length <= max count
   (func $owner (param i64 i32 i32) (result i32))             id, buffer ptr, buffer len -> length of "region", "player:<name>" or "capsule:<id>"; -1 if the entity is gone
   (func $find (param i32 i32 i64) (result i64))              key ptr, key len, after -> next entity id above `after` that has the key, -1 when none; start with after = -1
+  (func $ground (param f64 f64) (result f64))                x, y -> height of the terrain in metres at that point (100 fuel); stand things on it with pos.z = ground + half their height
   (func $near (param i64 f64 f64 f64 i64) (result i64))      dim, x, y, radius (at most 512), after -> next entity id above `after` whose pos.x, pos.y lies within radius metres in that dim, -1 when none; start with after = -1
 Writes (need a handle):
   (func $set_num (param i32 i32 i32 f64))                    handle, key ptr, key len, value

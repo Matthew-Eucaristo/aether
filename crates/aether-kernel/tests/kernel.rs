@@ -1001,6 +1001,14 @@ const CHURN: &str = r#"(module
     (drop (call $spawn))
     (call $despawn (local.get $a))))"#;
 
+const GROUND: &str = r#"(module
+  (import "world" "ground" (func $ground (param f64 f64) (result f64)))
+  (import "world" "set_num" (func $set (param i32 i32 i32 f64)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "ground")
+  (func (export "tick")
+    (call $set (i32.const 0) (i32.const 0) (i32.const 6) (call $ground (f64.const 137.5) (f64.const -912.25)))))"#;
+
 const NEAR: &str = r#"(module
   (import "world" "near" (func $near (param i64 f64 f64 f64 i64) (result i64)))
   (import "world" "set_num" (func $set (param i32 i32 i32 f64)))
@@ -1077,6 +1085,12 @@ fn rules_fingerprint() {
     let mut k = Kernel::new(
         Law {
             region_fuel_per_tick: 12_000_000,
+            terrain: aether_kernel::Terrain {
+                seed: 99,
+                relief: 30,
+                scale: 150,
+                plaza: 40,
+            },
             ..Law::default()
         },
         42,
@@ -1099,6 +1113,7 @@ fn rules_fingerprint() {
         CHURN,
         FLASH,
         NEAR,
+        GROUND,
         MATH,
     ] {
         install(&mut k, name, vec![]);
@@ -1140,8 +1155,8 @@ fn rules_fingerprint() {
     assert_eq!(
         (RULES, fingerprint.as_str()),
         (
-            "aether-rules/12",
-            "1c95b716cc6a2e127d733940dcf610bddb5598c5abe9a683480ea113831768e1"
+            "aether-rules/13",
+            "bce86f9de25d603500baee7654007654f4299a870da42bdca84c206fd3d61b36"
         ),
         "the kernel's observable behaviour changed: if that is intended, bump RULES and update this fingerprint"
     );

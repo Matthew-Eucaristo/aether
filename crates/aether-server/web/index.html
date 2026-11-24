@@ -414,6 +414,39 @@ function cross(a, b) { return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b
 function norm(a) { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; }
 function toGL(p) { return [p[0], p[2], -p[1]]; }
 
+function lattice(x, y, seed, octave) {
+  let h = seed ^ Math.imul(x | 0, 0x27d4eb2d) ^ Math.imul(y | 0, 0x165667b1) ^ Math.imul(octave, 0x9e3779b9);
+  h ^= h >>> 15; h = Math.imul(h, 0x85ebca6b);
+  h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35);
+  h ^= h >>> 16;
+  return (h >>> 0) / 4294967296;
+}
+function smooth(t) { return t * t * (3 - 2 * t); }
+function noise2(x, y, seed, octave) {
+  const fx = Math.floor(x), fy = Math.floor(y);
+  const u = smooth(x - fx), v = smooth(y - fy);
+  const a = lattice(fx, fy, seed, octave), b = lattice(fx + 1, fy, seed, octave);
+  const c = lattice(fx, fy + 1, seed, octave), d = lattice(fx + 1, fy + 1, seed, octave);
+  const top = a + (b - a) * u, bottom = c + (d - c) * u;
+  return top + (bottom - top) * v;
+}
+function groundAt(x, y) {
+  const t = world.law && world.law.terrain;
+  if (!t || !t.relief || !Number.isFinite(x) || !Number.isFinite(y)) return 0;
+  const scl = Math.max(1, t.scale);
+  let px = x / scl, py = y / scl, sum = 0, weight = 1, total = 0;
+  for (let octave = 0; octave < 5; octave++) {
+    sum += noise2(px, py, t.seed, octave) * weight;
+    total += weight; weight *= 0.5; px *= 2; py *= 2;
+  }
+  let h = t.relief * (2 * (sum / total) - 1);
+  if (t.plaza > 0) {
+    const d = Math.sqrt(x * x + y * y);
+    h *= smooth(Math.min(1, Math.max(0, (d - t.plaza) / t.plaza)));
+  }
+  return h;
+}
+
 const canvas = $("view");
 const gl = canvas.getContext("webgl2", { antialias: true });
 if (!gl) {
@@ -671,13 +704,53 @@ function shapeMesh(geom) {
     gl.vertexAttribDivisor(loc, 1);
   }
   gl.bindVertexArray(null);
-  return { vao, inst, count: geom.idx.length, data: new Float32Array(1024), n: 0 };
+  return { vao, vbo, inst, count: geom.idx.length, data: new Float32Array(1024), n: 0 };
+}
+const TERRAIN_N = 97, TERRAIN_STEP = 3;
+function terrainGeom(cx, cy) {
+  const v = [], idx = [], half = (TERRAIN_N - 1) / 2;
+  const at = (i, j) => groundAt(cx + (i - half) * TERRAIN_STEP, cy + (j - half) * TERRAIN_STEP);
+  for (let j = 0; j < TERRAIN_N; j++) {
+    for (let i = 0; i < TERRAIN_N; i++) {
+      const x = cx + (i - half) * TERRAIN_STEP, y = cy + (j - half) * TERRAIN_STEP;
+      const dx = at(i + 1, j) - at(i - 1, j), dy = at(i, j + 1) - at(i, j - 1);
+      const n = norm([-dx, -dy, 2 * TERRAIN_STEP]);
+      v.push(x, y, at(i, j), n[0], n[1], n[2]);
+    }
+  }
+  for (let j = 0; j < TERRAIN_N - 1; j++) {
+    for (let i = 0; i < TERRAIN_N - 1; i++) {
+      const a = j * TERRAIN_N + i, b = a + 1, c = a + TERRAIN_N, d = c + 1;
+      idx.push(a, b, d, a, d, c);
+    }
+  }
+  return { v, idx };
 }
 const SHAPES = {
   sphere: shapeMesh(sphereGeom(14, 24)),
   box: shapeMesh(boxGeom()),
   cylinder: shapeMesh(cylinderGeom(28)),
+  terrain: shapeMesh(terrainGeom(0, 0)),
 };
+const terrainAt = { key: "" };
+function updateTerrain() {
+  const t = world.law && world.law.terrain, mesh = SHAPES.terrain;
+  mesh.n = 0;
+  if (!t || !t.relief) return false;
+  const snap = TERRAIN_STEP * 8;
+  const cx = Math.round(cam.target[0] / snap) * snap, cy = Math.round(-cam.target[2] / snap) * snap;
+  const key = JSON.stringify([t, cx, cy]);
+  if (key !== terrainAt.key) {
+    terrainAt.key = key;
+    const geom = terrainGeom(cx, cy);
+    gl.bindVertexArray(mesh.vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, mesh.vbo);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(geom.v), gl.STATIC_DRAW);
+    gl.bindVertexArray(null);
+  }
+  pushInstance(mesh, [0, 0, 0], [1, 1, 1], [0, 0, 0], [0.34, 0.45, 0.27], 0);
+  return true;
+}
 function reserve(mesh, count) {
   if (mesh.data.length < count * 16) mesh.data = new Float32Array(Math.max(count * 16, mesh.data.length * 2));
 }
@@ -731,7 +804,7 @@ function orient(e, shape) {
 }
 function frameScene(now) {
   for (const k of ["sphere", "box", "cylinder"]) SHAPES[k].n = 0;
-  pushInstance(SHAPES.box, [cam.target[0], -cam.target[2], -0.03], [160, 160, 0.05], [0, 0, 0], [0.11, 0.125, 0.15], 0);
+  if (!updateTerrain()) pushInstance(SHAPES.box, [cam.target[0], -cam.target[2], -0.03], [160, 160, 0.05], [0, 0, 0], [0.11, 0.125, 0.15], 0);
   const ents = [], lights = [];
   for (const [id, m] of motion) {
     const e = world.entities.get(id);
@@ -1183,6 +1256,7 @@ function draw(now) {
   const began = performance.now();
   const dpr = window.devicePixelRatio || 1;
   const w = Math.floor(canvas.clientWidth * dpr), h = Math.floor(canvas.clientHeight * dpr);
+  if (w === 0 || h === 0) { requestAnimationFrame(draw); return; }
   if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
   ensureTargets(w, h);
   gpuBegin();
@@ -1190,12 +1264,12 @@ function draw(now) {
   playFrame(now);
   const eye = eyePos();
   const view = M.lookAt(eye, cam.target, [0, 1, 0]);
-  const vp = M.mul(M.perspective(0.9, w / h, 0.1, 200), view);
+  const vp = M.mul(M.perspective(0.9, w / h, 0.1, 400), view);
   const { ents, caps, lights } = frameScene(now);
   const byId = new Map(ents.map((e) => [e.id, e]));
   const fwd = norm(sub(cam.target, eye)), right = norm(cross(fwd, [0, 1, 0])), upv = cross(right, fwd);
   const lines = [];
-  for (let i = -20; i <= 20; i++) {
+  for (let i = -20; i <= 20 && !SHAPES.terrain.n; i++) {
     const a = i % 5 === 0 ? 0.22 : 0.08;
     pushLine(lines, [i, 0, -20], [i, 0, 20], [0.45, 0.52, 0.66], a);
     pushLine(lines, [-20, 0, i], [20, 0, i], [0.45, 0.52, 0.66], a);
@@ -1365,7 +1439,7 @@ function draw(now) {
   gl.blitFramebuffer(0, 0, w, h, 0, 0, w, h, gl.DEPTH_BUFFER_BIT, gl.NEAREST);
   gl.readBuffer(gl.COLOR_ATTACHMENT0);
 
-  const proj = M.perspective(0.9, w / h, 0.1, 200);
+  const proj = M.perspective(0.9, w / h, 0.1, 400);
   const [gi0, gi1] = targets.gi;
   if (settings.gi) {
   gl.bindFramebuffer(gl.FRAMEBUFFER, gi0.fbo);
@@ -1604,7 +1678,7 @@ function solids() {
 }
 function collide(p, vz, list) {
   const B = 0.35;
-  let ground = 0.9;
+  let ground = groundAt(p[0], p[1]) + 0.9;
   for (const s of list) {
     if (s.kind !== 1 && Math.abs(s.w[2]) <= 0.9) continue;
     const top = s.z + s.hz, bot = s.z - s.hz, feet = p[2] - 0.9, dx = p[0] - s.x, dy = p[1] - s.y;
@@ -1717,7 +1791,7 @@ function playFrame(now) {
   const ground = collide(q, play.vz, list);
   play.grounded = q[2] <= ground;
   if (play.grounded) { q[2] = ground; play.vz = 0; }
-  q[0] = Math.max(-60, Math.min(60, q[0])); q[1] = Math.max(-60, Math.min(60, q[1]));
+  q[0] = Math.max(-1e6, Math.min(1e6, q[0])); q[1] = Math.max(-1e6, Math.min(1e6, q[1]));
   play.hist.push({ t: now, p: [...q] });
   while (play.hist.length && now - play.hist[0].t > 700) play.hist.shift();
   const head = [q[0] + rx * 0.6, q[1] + ry * 0.6, q[2] + 0.8];
