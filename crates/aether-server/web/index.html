@@ -28,6 +28,9 @@
   #hudbar { position:absolute; left:50%; bottom:22px; transform:translateX(-50%); background:rgba(11,13,18,.8); border:1px solid var(--line); border-radius:8px; padding:8px 14px; font-size:13px; display:flex; gap:16px; align-items:center; }
   #hp { width:160px; height:10px; background:#2a2f3a; border-radius:5px; overflow:hidden; }
   #hpfill { height:100%; width:100%; background:#4ade80; transition:width .15s; }
+  #cross.hit:before, #cross.hit:after { background:#ff4d4d; box-shadow:0 0 6px #ff4d4d; }
+  #hud.hurt { box-shadow: inset 0 0 120px rgba(255,30,30,.55); }
+  #feed { position:absolute; right:16px; top:14px; text-align:right; white-space:pre; font-size:13px; color:#fde68a; text-shadow:0 0 6px #000; }
   #hudmsg { position:absolute; left:50%; top:38%; transform:translateX(-50%); font-size:22px; color:#fca5a5; text-shadow:0 0 8px #000; }
   #tip { position:absolute; pointer-events:none; background:rgba(20,24,33,.95); border:1px solid var(--line); border-radius:4px; padding:4px 8px; font-size:11px; display:none; white-space:pre; }
   aside { overflow-y:auto; border-left:1px solid var(--line); background:var(--panel); }
@@ -83,7 +86,7 @@
     <div>drag: orbit · shift-drag: pan · wheel: zoom · click: inspect</div>
   </div>
   <div id="tip"></div>
-  <div id="hud"><div id="cross"></div><div id="hudmsg"></div>
+  <div id="hud"><div id="cross"></div><div id="hudmsg"></div><div id="feed"></div>
     <div id="hudbar"><span id="hudname"></span><div id="hp"><div id="hpfill"></div></div><span id="hudhp">100</span><span>weapon <b id="hudslot">1</b></span><span id="hudscore" class="dim"></span><span class="dim">WASD · space · click · 1-9 · esc</span></div>
   </div>
   <canvas id="beat"></canvas>
@@ -1555,128 +1558,69 @@ function updateAudio(eye, fwd, upv, now) {
 function signal(entity, name, value) { act({ op: "signal", entity, name, value }); }
 
 const play = { active: false, locked: false, avatar: null, pos: null, vz: 0, keys: new Set(), firing: false, weapon: 1,
-  deaths: null, sent: {}, askedAvatar: 0, askedJoin: 0, last: 0 };
+  grounded: true, sent: {}, askedJoin: 0, last: 0, hist: [], seen: "", hits: null, hp: null, seq: null, feed: [] };
 function myName() { return world.you && world.you !== "admin" ? world.you.player : null; }
 function findEntity(test) { for (const [id, e] of world.entities) if (test(e, id)) return id; return null; }
+function realmEntity() { return findEntity((e) => e.components.realm); }
 function myAvatar() {
   const name = myName();
-  return name ? findEntity((e) => e.owner && e.owner.player === name && e.components.avatar) : null;
+  return name ? findEntity((e) => text(e, "player") === "player:" + name && e.components.avatar) : null;
 }
 function vitalsOf(av) { const id = findEntity((e) => num(e, "of") === av); return id === null ? null : world.entities.get(id); }
-function spawnPoint() {
-  const a = Math.random() * Math.PI * 2, r = 9 + Math.random() * 5;
-  return [Math.cos(a) * r, Math.sin(a) * r, 0.9];
-}
 function nameColor(name) {
   let h = 0;
   for (const c of name) h = (h * 31 + c.charCodeAt(0)) >>> 0;
   const hue = h % 360, f = (n) => { const k = (n + hue / 30) % 12; return 0.55 - 0.45 * Math.max(-1, Math.min(k - 3, 9 - k, 1)); };
-  return "#" + [f(0), f(8), f(4)].map((x) => Math.round(x * 255).toString(16).padStart(2, "0")).join("");
+  return [f(0), f(8), f(4)].reduce((acc, x) => acc * 256 + Math.round(x * 255), 0);
 }
-function solidBoxes() {
+function solids() {
   const out = [];
   for (const e of world.entities.values()) {
-    const c = e.components;
-    if (text(e, "shape") !== "box" || c.of || c.projectile || c.avatar || num(e, "pos.x") === undefined) continue;
-    if (c.solid && "bool" in c.solid && !c.solid.bool) continue;
-    const size = (num(e, "size") ?? 0.28) * 2, yaw = num(e, "rot.z") ?? 0;
-    out.push({ x: num(e, "pos.x"), y: num(e, "pos.y") ?? 0, z: num(e, "pos.z") ?? 0,
-      hx: Math.abs(num(e, "scale.x") ?? size) / 2, hy: Math.abs(num(e, "scale.y") ?? size) / 2, hz: Math.abs(num(e, "scale.z") ?? size) / 2,
-      c: Math.cos(yaw), s: Math.sin(yaw) });
+    const c = e.components, shape = text(e, "shape");
+    const kind = shape === "box" ? 0 : shape === "sphere" ? 1 : shape === "cylinder" ? 2 : -1;
+    if (kind < 0 || c.of || c.projectile || c.avatar || num(e, "pos.x") === undefined) continue;
+    if (!(c.solid && "bool" in c.solid ? c.solid.bool : kind === 0)) continue;
+    const size = num(e, "size") ?? 0.28, full = kind === 1 ? 1 : 0.5, d = kind === 1 ? size : size * 2;
+    const R = rotation(orient(e, shape));
+    out.push({ kind, x: num(e, "pos.x"), y: num(e, "pos.y") ?? 0, z: num(e, "pos.z") ?? 0,
+      hx: Math.abs(num(e, "scale.x") ?? d) * full, hy: Math.abs(num(e, "scale.y") ?? d) * full, hz: Math.abs(num(e, "scale.z") ?? d) * full,
+      u: [R[0][0], R[1][0], R[2][0]], v: [R[0][1], R[1][1], R[2][1]], w: [R[0][2], R[1][2], R[2][2]] });
   }
   return out;
 }
-function collide(p, vz) {
-  const R = 0.35;
+function collide(p, vz, list) {
+  const B = 0.35;
   let ground = 0.9;
-  for (const b of solidBoxes()) {
-    const ox = p[0] - b.x, oy = p[1] - b.y;
-    const lx = ox * b.c + oy * b.s, ly = -ox * b.s + oy * b.c;
-    const top = b.z + b.hz, feet = p[2] - 0.9;
-    const insideXY = Math.abs(lx) < b.hx + R * 0.5 && Math.abs(ly) < b.hy + R * 0.5;
-    if (insideXY && feet >= top - 0.35 && vz <= 0) { ground = Math.max(ground, top + 0.9); continue; }
-    if (p[2] + 0.9 < b.z - b.hz || feet > top) continue;
-    const cx = Math.max(-b.hx, Math.min(b.hx, lx)), cy = Math.max(-b.hy, Math.min(b.hy, ly));
-    let nx = lx - cx, ny = ly - cy, d = Math.hypot(nx, ny);
-    if (d >= R) continue;
-    if (d < 1e-6) {
-      const px = b.hx - Math.abs(lx), py = b.hy - Math.abs(ly);
-      if (px < py) { nx = Math.sign(lx) || 1; ny = 0; d = -px; } else { nx = 0; ny = Math.sign(ly) || 1; d = -py; }
-    } else { nx /= d; ny /= d; }
-    const push = R - d;
-    const wx = nx * b.c - ny * b.s, wy = nx * b.s + ny * b.c;
-    p[0] += wx * push; p[1] += wy * push;
+  for (const s of list) {
+    if (s.kind !== 1 && Math.abs(s.w[2]) <= 0.9) continue;
+    const top = s.z + s.hz, bot = s.z - s.hz, feet = p[2] - 0.9, dx = p[0] - s.x, dy = p[1] - s.y;
+    if (s.kind === 0) {
+      const lx = dx * s.u[0] + dy * s.u[1], ly = dx * s.v[0] + dy * s.v[1];
+      if (Math.abs(lx) < s.hx + 0.17 && Math.abs(ly) < s.hy + 0.17 && feet >= top - 0.35 && vz <= 0) { ground = Math.max(ground, top + 0.9); continue; }
+      if (p[2] + 0.9 < bot || feet > top) continue;
+      const cx = Math.max(-s.hx, Math.min(s.hx, lx)), cy = Math.max(-s.hy, Math.min(s.hy, ly));
+      let nx = lx - cx, ny = ly - cy, d = Math.hypot(nx, ny);
+      if (d >= B) continue;
+      if (d < 1e-6) {
+        if (s.hx - Math.abs(lx) < s.hy - Math.abs(ly)) { nx = lx < 0 ? -1 : 1; ny = 0; d = Math.abs(lx) - s.hx; }
+        else { nx = 0; ny = ly < 0 ? -1 : 1; d = Math.abs(ly) - s.hy; }
+      } else { nx /= d; ny /= d; }
+      const push = B - d;
+      p[0] += push * (nx * s.u[0] + ny * s.v[0]); p[1] += push * (nx * s.u[1] + ny * s.v[1]);
+    } else {
+      const r = Math.max(s.hx, s.hy), d = Math.hypot(dx, dy);
+      if (d < r * 0.8 && feet >= top - 0.35 && vz <= 0) { ground = Math.max(ground, top + 0.9); continue; }
+      if (p[2] + 0.9 < bot || feet > top || d >= r + B || d < 1e-6) continue;
+      const k = (r + B - d) / d;
+      p[0] += dx * k; p[1] += dy * k;
+    }
   }
   return ground;
 }
-function playFrame(now) {
-  const dt = Math.min(0.05, (now - (play.last || now)) / 1000);
-  play.last = now;
-  $("hud").className = play.active ? "on" : "";
-  if (!play.active) return;
-  const av = myAvatar();
-  if (av === null) {
-    play.avatar = null; play.pos = null;
-    if (now - play.askedAvatar > 3000) {
-      play.askedAvatar = now;
-      const p = spawnPoint(), name = myName();
-      const v = (x) => ({ num: x });
-      act({ op: "spawn", components: { avatar: { bool: true }, shape: { text: "cylinder" }, "scale.x": v(0.7), "scale.y": v(0.7), "scale.z": v(1.8),
-        "pos.x": v(p[0]), "pos.y": v(p[1]), "pos.z": v(p[2]), "aim.x": v(1), "aim.y": v(0), "aim.z": v(0), weapon: v(1),
-        color: { text: nameColor(name) }, label: { text: name } } });
-    }
-    $("hudmsg").textContent = "spawning…";
-    return;
-  }
-  const e = world.entities.get(av);
-  if (play.avatar !== av || !play.pos) { play.avatar = av; play.pos = [num(e, "pos.x") ?? 0, num(e, "pos.y") ?? 0, num(e, "pos.z") ?? 0.9]; play.vz = 0; play.deaths = null; }
-  const vit = vitalsOf(av);
-  const dead = vit ? (num(vit, "dead") ?? 0) > 0 : false;
-  if (vit) {
-    const deaths = num(vit, "deaths") ?? 0;
-    if (play.deaths !== null && deaths > play.deaths) { play.pos = spawnPoint(); play.vz = 0; }
-    play.deaths = deaths;
-    const hp = num(vit, "health") ?? 100;
-    $("hpfill").style.width = hp + "%";
-    $("hpfill").style.background = hp > 35 ? "#4ade80" : "#ef4444";
-    $("hudhp").textContent = Math.round(hp);
-  }
-  const arena = findEntity((x) => x.components.arena);
-  $("hudmsg").textContent = dead ? "respawning…" : !play.locked ? "click the view to aim" : arena === null ? "no arena here: ask an admin to install arena" : "";
-  const board = arena === null ? null : text(world.entities.get(arena), "label");
-  $("hudscore").textContent = board ? (board.split("\n").find((l) => l.startsWith(myName() + " ")) || "").trim() : "";
-  $("hudname").textContent = myName();
-  $("hudslot").textContent = play.weapon;
-  const fx = -Math.sin(cam.yaw), fy = Math.cos(cam.yaw), rx = fy, ry = -fx;
-  const k = play.keys, p = play.pos;
-  if (!dead && play.locked) {
-    let mx = (k.has("KeyW") - k.has("KeyS")) * fx + (k.has("KeyD") - k.has("KeyA")) * rx;
-    let my = (k.has("KeyW") - k.has("KeyS")) * fy + (k.has("KeyD") - k.has("KeyA")) * ry;
-    const l = Math.hypot(mx, my), speed = k.has("ShiftLeft") ? 8 : 5;
-    if (l > 0) { p[0] += mx / l * speed * dt; p[1] += my / l * speed * dt; }
-  }
-  play.vz -= 22 * dt;
-  p[2] += play.vz * dt;
-  const ground = collide(p, play.vz);
-  if (p[2] <= ground) {
-    p[2] = ground; play.vz = 0;
-    if (k.has("Space") && !dead && play.locked) play.vz = 8;
-  }
-  p[0] = Math.max(-60, Math.min(60, p[0])); p[1] = Math.max(-60, Math.min(60, p[1]));
-  const head = [p[0] + rx * 0.6, p[1] + ry * 0.6, p[2] + 0.8];
-  cam.target = toGL(head);
-  cam.dist = 3.8;
-  const eyeW = (() => { const e = eyePos(); return [e[0], -e[2], e[1]]; })();
-  const d = sub(eyeW, head);
-  let t = 1;
-  for (const b of solidBoxes()) t = Math.min(t, segmentBox(head, d, b, 0.25));
-  cam.dist = Math.max(0.5, 3.8 * t - 0.15);
-}
-function segmentBox(o, d, b, pad) {
-  const ox = o[0] - b.x, oy = o[1] - b.y;
-  const lo = [ox * b.c + oy * b.s, -ox * b.s + oy * b.c, o[2] - b.z];
-  const ld = [d[0] * b.c + d[1] * b.s, -d[0] * b.s + d[1] * b.c, d[2]];
-  const h = [b.hx + pad, b.hy + pad, b.hz + pad];
+function segmentSolid(o, d, s, pad) {
+  const q = sub(o, [s.x, s.y, s.z]);
+  const lo = [dot(q, s.u), dot(q, s.v), dot(q, s.w)], ld = [dot(d, s.u), dot(d, s.v), dot(d, s.w)];
+  const h = [s.hx + pad, s.hy + pad, s.hz + pad];
   let t0 = 0, t1 = 1;
   for (let a = 0; a < 3; a++) {
     if (Math.abs(ld[a]) < 1e-9) { if (Math.abs(lo[a]) > h[a]) return 1; continue; }
@@ -1687,24 +1631,115 @@ function segmentBox(o, d, b, pad) {
   }
   return t0;
 }
+function flash(id, cls, ms) { const el = $(id); el.classList.add(cls); clearTimeout(el["t" + cls]); el["t" + cls] = setTimeout(() => el.classList.remove(cls), ms); }
+function playHud(av, realm, now) {
+  const vit = vitalsOf(av);
+  if (vit) {
+    const hp = num(vit, "health") ?? 100, hits = num(vit, "hits") ?? 0;
+    if (play.hp !== null && hp < play.hp) flash("hud", "hurt", 260);
+    if (play.hits !== null && hits > play.hits) flash("cross", "hit", 140);
+    play.hp = hp; play.hits = hits;
+    $("hpfill").style.width = hp + "%";
+    $("hpfill").style.background = hp > 35 ? "#4ade80" : "#ef4444";
+    $("hudhp").textContent = Math.round(hp);
+  }
+  const re = realm === null ? null : world.entities.get(realm);
+  if (re) {
+    const seq = num(re, "seq") ?? 0;
+    if (play.seq !== null && seq > play.seq && text(re, "feed")) play.feed.push({ text: text(re, "feed"), t: now });
+    play.seq = seq;
+    const board = text(re, "label") || "";
+    $("hudscore").textContent = (board.split("\n").find((l) => l.startsWith(myName() + " ")) || "").trim();
+  }
+  play.feed = play.feed.filter((f) => now - f.t < 6000).slice(-5);
+  $("feed").textContent = play.feed.map((f) => f.text).join("\n");
+  const dead = vit ? (num(vit, "dead") ?? 0) > 0 : false;
+  $("hudmsg").textContent = dead ? "respawning…" : !play.locked ? "click the view to aim" : "";
+  $("hudname").textContent = myName();
+  $("hudslot").textContent = play.weapon;
+  return dead;
+}
+function playFrame(now) {
+  const dt = Math.min(0.05, (now - (play.last || now)) / 1000);
+  play.last = now;
+  $("hud").className = play.active ? "on" : "";
+  if (!play.active) return;
+  const realm = realmEntity();
+  const av = myAvatar();
+  if (av === null) {
+    play.avatar = null; play.pos = null;
+    $("hudmsg").textContent = realm === null ? "no realm here: an admin installs the realm capsule" : "joining…";
+    return;
+  }
+  const e = world.entities.get(av);
+  const srv = [num(e, "pos.x") ?? 0, num(e, "pos.y") ?? 0, num(e, "pos.z") ?? 0.9];
+  if (play.avatar !== av || !play.pos) { play.avatar = av; play.pos = [...srv]; play.vz = 0; play.hist = []; play.sent = {}; }
+  const dead = playHud(av, realm, now);
+  const p = play.pos, key = srv.join(",");
+  if (key !== play.seen) {
+    play.seen = key;
+    let best = null, bd = Infinity;
+    for (const h of play.hist) { const d = Math.hypot(h.p[0] - srv[0], h.p[1] - srv[1], h.p[2] - srv[2]); if (d < bd) { bd = d; best = h; } }
+    if (!best || bd > 2.5) { play.pos = [...srv]; play.vz = 0; play.hist = []; }
+    else if (bd > 0.03) for (let i = 0; i < 3; i++) p[i] += (srv[i] - best.p[i]) * 0.5;
+  }
+  const q = play.pos;
+  const fx = -Math.sin(cam.yaw), fy = Math.cos(cam.yaw), rx = fy, ry = -fx;
+  const k = play.keys;
+  const list = solids();
+  play.move = [0, 0];
+  if (!dead && play.locked) {
+    const mx = (k.has("KeyW") - k.has("KeyS")) * fx + (k.has("KeyD") - k.has("KeyA")) * rx;
+    const my = (k.has("KeyW") - k.has("KeyS")) * fy + (k.has("KeyD") - k.has("KeyA")) * ry;
+    const l = Math.hypot(mx, my), speed = k.has("ShiftLeft") ? 8 : 5;
+    if (l > 0) {
+      play.move = [mx / l, my / l];
+      const steps = Math.ceil(speed * dt / 0.15);
+      for (let i = 0; i < steps; i++) { q[0] += play.move[0] * speed * dt / steps; q[1] += play.move[1] * speed * dt / steps; collide(q, play.vz, list); }
+    }
+  }
+  play.vz -= 22 * dt;
+  q[2] += play.vz * dt;
+  const ground = collide(q, play.vz, list);
+  play.grounded = q[2] <= ground;
+  if (play.grounded) { q[2] = ground; play.vz = 0; }
+  q[0] = Math.max(-60, Math.min(60, q[0])); q[1] = Math.max(-60, Math.min(60, q[1]));
+  play.hist.push({ t: now, p: [...q] });
+  while (play.hist.length && now - play.hist[0].t > 700) play.hist.shift();
+  const head = [q[0] + rx * 0.6, q[1] + ry * 0.6, q[2] + 0.8];
+  cam.target = toGL(head);
+  cam.dist = 3.8;
+  const eyeW = (() => { const x = eyePos(); return [x[0], -x[2], x[1]]; })();
+  const d = sub(eyeW, head);
+  let t = 1;
+  for (const s of list) t = Math.min(t, segmentSolid(head, d, s, 0.25));
+  cam.dist = Math.max(0.5, 3.8 * t - 0.15);
+}
+function sendIntent(av, name, v, eps) {
+  const r = Math.round(v * 100) / 100;
+  if (play.sent[name] !== undefined && Math.abs(play.sent[name] - r) < eps) return;
+  play.sent[name] = r;
+  signal(av, name, r);
+}
 function playNet() {
-  if (!play.active || play.avatar === null || !play.pos) return;
-  const av = play.avatar, now = performance.now();
+  if (!play.active) return;
+  const now = performance.now(), realm = realmEntity();
+  if (play.avatar === null || !play.pos) {
+    if (realm !== null && myName() && now - play.askedJoin > 2000) { play.askedJoin = now; signal(realm, "join", nameColor(myName())); }
+    return;
+  }
+  const av = play.avatar;
   const eye = eyePos(), fwd = norm(sub(cam.target, eye));
   const far = add(eye, scale(fwd, 40)), farW = [far[0], -far[2], far[1]];
-  const chest = [play.pos[0], play.pos[1], play.pos[2] + 0.3];
-  const aim = norm(sub(farW, chest));
-  const want = { "pos.x": play.pos[0], "pos.y": play.pos[1], "pos.z": play.pos[2], "aim.x": aim[0], "aim.y": aim[1], "aim.z": aim[2], weapon: play.weapon };
-  for (const [key, v] of Object.entries(want)) {
-    const r = Math.round(v * 1000) / 1000;
-    if (play.sent[key] === r && play.sent.av === av) continue;
-    play.sent[key] = r;
-    act({ op: "set", entity: av, key, value: { num: r } });
-  }
-  play.sent.av = av;
+  const aim = norm(sub(farW, [play.pos[0], play.pos[1], play.pos[2] + 0.3]));
+  sendIntent(av, "mx", play.move ? play.move[0] : 0, 0.02);
+  sendIntent(av, "my", play.move ? play.move[1] : 0, 0.02);
+  sendIntent(av, "run", play.keys.has("ShiftLeft") ? 1 : 0, 0.5);
+  sendIntent(av, "ax", aim[0], 0.01);
+  sendIntent(av, "ay", aim[1], 0.01);
+  sendIntent(av, "az", aim[2], 0.01);
+  sendIntent(av, "weapon", play.weapon, 0.5);
   if (play.firing && play.locked) signal(av, "fire", play.weapon);
-  const arena = findEntity((x) => x.components.arena);
-  if (arena !== null && !vitalsOf(av) && now - play.askedJoin > 2000) { play.askedJoin = now; signal(arena, "join", av); }
 }
 setInterval(playNet, TICK_MS);
 $("play").onclick = () => {
@@ -1712,12 +1747,17 @@ $("play").onclick = () => {
   play.active = !play.active;
   $("play").textContent = play.active ? "stop playing" : "play";
   if (play.active) { canvas.requestPointerLock(); cam.pitch = 0.25; }
-  else { document.exitPointerLock(); play.firing = false; cam.dist = 14; }
+  else {
+    document.exitPointerLock(); play.firing = false; cam.dist = 14;
+    if (play.avatar !== null) signal(play.avatar, "leave", 1);
+    play.avatar = null; play.pos = null;
+  }
 };
 document.addEventListener("pointerlockchange", () => { play.locked = document.pointerLockElement === canvas; if (!play.locked) play.firing = false; });
 window.addEventListener("keydown", (e) => {
   if (!play.active || !play.locked) return;
   if (/^Digit[1-9]$/.test(e.code)) play.weapon = Number(e.code.slice(5));
+  if (e.code === "Space" && !e.repeat && play.avatar !== null && play.grounded) { play.vz = 8; play.grounded = false; signal(play.avatar, "jump", 1); }
   play.keys.add(e.code);
   e.preventDefault();
 });

@@ -265,6 +265,43 @@ pub fn context(k: &Kernel, actor: &Actor) -> String {
             "This player holds {} of {} entities and {} of {} bytes, counting their capsules.",
             used.entities, law.player_quota.entities, used.bytes, law.player_quota.bytes
         );
+        let label = Value::Text(format!("player:{}", p.0));
+        match state
+            .world
+            .entities()
+            .find(|(_, e)| e.components.get("player") == Some(&label))
+        {
+            Some((id, e)) => {
+                let _ = writeln!(
+                    out,
+                    "Their body is entity #{}: {}",
+                    id.0,
+                    entity_line(id, e)
+                );
+                let slots: Vec<String> = state
+                    .capsules
+                    .iter()
+                    .filter(|(_, c)| {
+                        c.installer == *actor
+                            && c.clist.get(1).copied().flatten().map(|cap| cap.entity) == Some(id)
+                    })
+                    .map(|(cid, _)| format!("capsule {}", cid.0))
+                    .collect();
+                if !slots.is_empty() {
+                    let _ = writeln!(
+                        out,
+                        "Their equipment (capsules holding the body as handle 1): {}. Read them to see which slots are taken.",
+                        slots.join(", ")
+                    );
+                }
+            }
+            None => {
+                let _ = writeln!(
+                    out,
+                    "They have no body yet: equipment needs one, so ask them to press play first."
+                );
+            }
+        }
     }
     let _ = writeln!(out, "\n## Capsules");
     if state.capsules.is_empty() {

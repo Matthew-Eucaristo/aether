@@ -25,7 +25,7 @@ const QUEUE: usize = 4096;
 const INDEX: &str = include_str!("../web/index.html");
 const EXAMPLES: [(&str, &str); 15] = [
     ("house", include_str!("../../../capsules/house.wat")),
-    ("arena", include_str!("../../../capsules/arena.wat")),
+    ("realm", include_str!("../../../capsules/realm.wat")),
     ("rifle", include_str!("../../../capsules/rifle.wat")),
     ("launcher", include_str!("../../../capsules/launcher.wat")),
     ("blackhole", include_str!("../../../capsules/blackhole.wat")),

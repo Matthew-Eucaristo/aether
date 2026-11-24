@@ -2,13 +2,13 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use aether_kernel::{Action, Actor, BlobHash, Grant, Input, InputOutcome, Kernel, Law};
+use aether_kernel::{Action, Actor, BlobHash, Grant, Input, Kernel, Law};
 use aether_store::Store;
 use aether_world::{PlayerId, Value};
 
 const BOUNCE: &str = include_str!("../../../capsules/bounce.wat");
 const BLACKHOLE: &str = include_str!("../../../capsules/blackhole.wat");
-const ARENA: &str = include_str!("../../../capsules/arena.wat");
+const REALM: &str = include_str!("../../../capsules/realm.wat");
 const RIFLE: &str = include_str!("../../../capsules/rifle.wat");
 const HOUSE: &str = include_str!("../../../capsules/house.wat");
 const SCAN: &str = r#"(module
@@ -206,13 +206,13 @@ fn main() {
 fn battle(players: usize) {
     let law = law();
     let mut k = Kernel::new(law.clone(), 1);
-    let arena = k.add_blob(ARENA.as_bytes().to_vec());
+    let realm = k.add_blob(REALM.as_bytes().to_vec());
     let rifle = k.add_blob(RIFLE.as_bytes().to_vec());
     let house = k.add_blob(HOUSE.as_bytes().to_vec());
     k.step(vec![Input {
         actor: Actor::Admin,
         action: Action::Install {
-            wasm: arena,
+            wasm: realm,
             grants: Vec::new(),
             budget: law.ceiling,
         },
@@ -223,38 +223,49 @@ fn battle(players: usize) {
         .capsules
         .values()
         .next()
-        .expect("arena")
+        .expect("realm")
         .self_entity;
     let who = |i: usize| Actor::Player(PlayerId(format!("p{i}")));
+    let signal = |i: usize, entity, name: &str, value: f64| Input {
+        actor: who(i),
+        action: Action::Signal {
+            entity,
+            name: name.into(),
+            value,
+        },
+    };
+    for batch in (0..players).collect::<Vec<_>>().chunks(6) {
+        k.step(batch.iter().map(|&i| signal(i, hub, "join", 0.0)).collect());
+    }
     let mut avatars = Vec::new();
     for i in 0..players {
+        let label = Value::Text(format!("player:p{i}"));
+        let id = k
+            .world()
+            .entities()
+            .find(|(_, e)| e.components.get("player") == Some(&label))
+            .map(|(id, _)| id)
+            .expect("the realm made a body");
         let a = i as f64 / players as f64 * std::f64::consts::TAU;
-        let r = k.step(vec![Input {
-            actor: who(i),
-            action: Action::Spawn {
-                components: BTreeMap::from([
-                    ("avatar".to_owned(), Value::Bool(true)),
-                    ("pos.x".to_owned(), Value::Num(12.0 * a.cos())),
-                    ("pos.y".to_owned(), Value::Num(12.0 * a.sin())),
-                    ("pos.z".to_owned(), Value::Num(0.9)),
-                    ("aim.x".to_owned(), Value::Num(-a.cos())),
-                    ("aim.y".to_owned(), Value::Num(-a.sin())),
-                    ("aim.z".to_owned(), Value::Num(0.0)),
-                ]),
-            },
-        }]);
-        let InputOutcome::Spawned(id) = r.inputs[0] else {
-            panic!("{:?}", r.inputs[0])
-        };
         k.step(vec![
             Input {
-                actor: who(i),
-                action: Action::Signal {
-                    entity: hub,
-                    name: "join".into(),
-                    value: id.0 as f64,
+                actor: Actor::Admin,
+                action: Action::Set {
+                    entity: id,
+                    key: "pos.x".into(),
+                    value: Value::Num(12.0 * a.cos()),
                 },
             },
+            Input {
+                actor: Actor::Admin,
+                action: Action::Set {
+                    entity: id,
+                    key: "pos.y".into(),
+                    value: Value::Num(12.0 * a.sin()),
+                },
+            },
+            signal(i, id, "ax", -a.cos()),
+            signal(i, id, "ay", -a.sin()),
             Input {
                 actor: who(i),
                 action: Action::Install {
@@ -271,6 +282,7 @@ fn battle(players: usize) {
     }
     let mut t = 0u64;
     let mut fuel = 0;
+    let mut realm_fuel = 0;
     let mut bullets = 0;
     let d = per_tick(
         || {
@@ -279,23 +291,15 @@ fn battle(players: usize) {
                 .iter()
                 .enumerate()
                 .flat_map(|(i, id)| {
+                    let strafe = if (t / 5 + i as u64).is_multiple_of(2) {
+                        1.0
+                    } else {
+                        -1.0
+                    };
                     [
-                        Input {
-                            actor: who(i),
-                            action: Action::Signal {
-                                entity: *id,
-                                name: "fire".into(),
-                                value: 1.0,
-                            },
-                        },
-                        Input {
-                            actor: who(i),
-                            action: Action::Set {
-                                entity: *id,
-                                key: "pos.z".into(),
-                                value: Value::Num(0.9 + (t % 7) as f64 * 0.01),
-                            },
-                        },
+                        signal(i, *id, "fire", 1.0),
+                        signal(i, *id, "mx", strafe * 0.5),
+                        signal(i, *id, "my", strafe * 0.5),
                     ]
                 })
                 .collect();
@@ -309,6 +313,7 @@ fn battle(players: usize) {
                 );
             }
             fuel = r.runs.iter().map(|x| x.fuel_used).sum();
+            realm_fuel = r.runs[0].fuel_used;
             bullets = k
                 .world()
                 .entities()
@@ -318,8 +323,8 @@ fn battle(players: usize) {
         50,
     );
     row(
-        &format!("battle: {players} players firing rifles + arena"),
+        &format!("battle: {players} players moving and firing + realm"),
         d,
-        format!("{fuel} fuel, {bullets} bullets in flight"),
+        format!("{fuel} fuel ({realm_fuel} realm), {bullets} bullets in flight"),
     );
 }

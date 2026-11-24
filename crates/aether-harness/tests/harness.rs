@@ -298,48 +298,52 @@ fn responses_are_parsed_with_their_stop_reasons() {
 #[tokio::test]
 async fn trials_can_pull_the_trigger() {
     let mut k = Kernel::new(Law::default(), 5);
-    let arena = k.add_blob(include_bytes!("../../../capsules/arena.wat").to_vec());
+    let realm = k.add_blob(include_bytes!("../../../capsules/realm.wat").to_vec());
     k.step(vec![Input {
         actor: Actor::Admin,
         action: aether_kernel::Action::Install {
-            wasm: arena,
+            wasm: realm,
             grants: vec![],
             budget: Law::default().ceiling,
         },
     }]);
     let hub = k.state().capsules.values().next().unwrap().self_entity;
-    let mut avatars = Vec::new();
-    for (name, x) in [("ana", 0.0), ("budi", 6.0)] {
-        let components = [
-            ("avatar", Value::Bool(true)),
-            ("pos.x", Value::Num(x)),
-            ("pos.y", Value::Num(0.0)),
-            ("pos.z", Value::Num(0.9)),
-            ("aim.x", Value::Num(1.0)),
-        ]
-        .into_iter()
-        .map(|(k, v)| (k.to_owned(), v))
-        .collect();
-        let r = k.step(vec![Input {
-            actor: Actor::Player(PlayerId(name.into())),
-            action: aether_kernel::Action::Spawn { components },
-        }]);
-        let InputOutcome::Spawned(id) = r.inputs[0] else {
-            panic!("{:?}", r.inputs[0])
-        };
-        k.step(vec![Input {
-            actor: Actor::Player(PlayerId(name.into())),
-            action: aether_kernel::Action::Signal {
-                entity: hub,
-                name: "join".into(),
-                value: id.0 as f64,
-            },
-        }]);
-        avatars.push(id);
-    }
-    let ana = avatars[0].0;
+    let join = |name: &str| Input {
+        actor: Actor::Player(PlayerId(name.into())),
+        action: aether_kernel::Action::Signal {
+            entity: hub,
+            name: "join".into(),
+            value: 0.0,
+        },
+    };
+    k.step(vec![join("ana"), join("budi")]);
+    let body = |k: &Kernel, name: &str| {
+        let label = Value::Text(format!("player:{name}"));
+        k.world()
+            .entities()
+            .find(|(_, e)| e.components.get("player") == Some(&label))
+            .map(|(id, _)| id)
+            .unwrap()
+    };
+    let (ana, budi) = (body(&k, "ana"), body(&k, "budi"));
+    let place = |entity, key: &str, value: f64| Input {
+        actor: Actor::Admin,
+        action: aether_kernel::Action::Set {
+            entity,
+            key: key.into(),
+            value: Value::Num(value),
+        },
+    };
+    k.step(vec![
+        place(ana, "pos.x", 0.0),
+        place(ana, "pos.y", 0.0),
+        place(budi, "pos.x", 6.0),
+        place(budi, "pos.y", 0.0),
+    ]);
+    k.step(vec![]);
+    let ana = ana.0;
     let mut inputs =
-        vec![json!({"tick": 1, "op": "set", "entity": ana, "name": "weapon", "value": 1})];
+        vec![json!({"tick": 1, "op": "signal", "entity": ana, "name": "weapon", "value": 1})];
     for t in 2..12 {
         inputs.push(json!({"tick": t, "op": "signal", "entity": ana, "name": "fire", "value": 1}));
     }
