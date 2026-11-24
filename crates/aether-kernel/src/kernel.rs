@@ -16,7 +16,7 @@ use crate::runtime::{Runtime, TABLE_ELEMENTS, THREAD_STACK};
 use crate::signal::{Sender, Signal};
 
 const LOG_BYTES_PER_TICK: usize = 1024;
-pub const RULES: &str = "aether-rules/13";
+pub const RULES: &str = "aether-rules/14";
 pub const GUARANTEED_FUEL: u64 = 250_000;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -280,6 +280,7 @@ impl Kernel {
                 .join()
                 .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
         });
+        crate::physics::step(&mut self.state.world, &self.state.law, &mut touched);
         self.journal.ticks.push(inputs);
         self.live.retain(|id, l| {
             self.state
@@ -680,6 +681,7 @@ impl Kernel {
                 .table_elements(TABLE_ELEMENTS)
                 .build(),
             terrain: law.terrain,
+            near: None,
         };
         let cached = self.live.remove(&id).filter(|l| {
             l.wasm == capsule.wasm

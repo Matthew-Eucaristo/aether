@@ -16,7 +16,9 @@ const CAPSULES: [&str; 8] = [
     include_str!("../../../capsules/deep.wat"),
 ];
 
-const KEYS: [&str; 6] = ["pos.x", "open", "name", "hp", "bad key", ""];
+const KEYS: [&str; 10] = [
+    "pos.x", "open", "name", "hp", "bad key", "", "body", "pos.z", "vel.x", "shape",
+];
 
 struct Rng(u64);
 
@@ -108,6 +110,7 @@ fn law(rng: &mut Rng) -> Law {
             scale: *rng.pick(&[0, 1, 200]),
             plaza: *rng.pick(&[0, 48]),
         },
+        max_bodies: *rng.pick(&[0, 3, 2048]),
     }
 }
 

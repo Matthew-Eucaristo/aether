@@ -74,6 +74,7 @@ impl Canon for Law {
             player_quota,
             ceiling,
             terrain,
+            max_bodies,
         } = self;
         max_entities.feed(h);
         max_capsules.feed(h);
@@ -86,6 +87,7 @@ impl Canon for Law {
         player_quota.feed(h);
         ceiling.feed(h);
         terrain.feed(h);
+        max_bodies.feed(h);
     }
 }
 

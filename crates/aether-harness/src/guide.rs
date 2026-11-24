@@ -70,7 +70,7 @@ Reads (public, take an entity id as i64):
   (func $owner (param i64 i32 i32) (result i32))             id, buffer ptr, buffer len -> length of "region", "player:<name>" or "capsule:<id>"; -1 if the entity is gone
   (func $find (param i32 i32 i64) (result i64))              key ptr, key len, after -> next entity id above `after` that has the key, -1 when none; start with after = -1
   (func $ground (param f64 f64) (result f64))                x, y -> height of the terrain in metres at that point (100 fuel); stand things on it with pos.z = ground + half their height
-  (func $near (param i64 f64 f64 f64 i64) (result i64))      dim, x, y, radius (at most 512), after -> next entity id above `after` whose pos.x, pos.y lies within radius metres in that dim, -1 when none; start with after = -1
+  (func $near (param i32 i32 i64 f64 f64 f64 i64) (result i64))  key ptr, key len (0 = any key), dim, x, y, radius (at most 512), after -> next entity id above `after` that has the key and whose pos.x, pos.y lies within radius metres in that dim, -1 when none; start with after = -1
 Writes (need a handle):
   (func $set_num (param i32 i32 i32 f64))                    handle, key ptr, key len, value
   (func $set_text (param i32 i32 i32 i32 i32))               handle, key ptr, key len, text ptr, text len
@@ -95,6 +95,12 @@ Other:
   (func $random (result i64))                                deterministic random 64 bits
   (func $log (param i32 i32))                                ptr, len; shown to people in the event log (1024 bytes per tick)
 Costs in fuel: get_nums and set_nums cost 1 per number on top of a read or write; each read 20, find and near 20 plus 1 per entity examined, get_text 20 plus its length, each write 50 (texts add their length), spawn 1000, despawn 200, log 10 plus its length.
+
+# Physics
+
+- The kernel simulates physics for every entity with body = true (the first law.max_bodies of them, by id). Each tick (0.1 s) it applies gravity (9.8 m/s² down), moves the body by vel.x, vel.y, vel.z in metres per second, and writes the new pos.* and vel.* back. Bodies are spheres of radius radius (default: size, 0.28); optional mass (default 1), bounce (0 to 1, default 0.3) and friction (0 to 1, default 0.5).
+- Bodies land on the terrain, rest on and bounce off boxes (rotated about z by rot.z only) and solid spheres, and push each other with momentum conserved. Avatars and projectiles are not bodies.
+- To throw or launch something, spawn it with body = true and set vel.*; to stop simulating it, remove body. A body at rest costs no writes.
 
 # Patterns that work
 

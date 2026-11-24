@@ -78,6 +78,9 @@ fn row(name: &str, d: Duration, note: String) {
 
 fn main() {
     println!("{:<44} {:>13}", "scenario", "per tick");
+    for bodies in [256, 2048] {
+        physics(bodies);
+    }
     for entities in [1_000, 10_000, 50_000] {
         let mut k = Kernel::new(law(), 1);
         k.step(spawn(entities));
@@ -201,6 +204,35 @@ fn main() {
     Store::open(&dir).expect("reopen");
     row("reopen with 10000 entities", start.elapsed(), String::new());
     std::fs::remove_dir_all(&dir).expect("bench dir is removable");
+}
+
+fn physics(bodies: usize) {
+    let mut k = Kernel::new(law(), 1);
+    let side = (bodies as f64).sqrt().ceil() as usize;
+    k.step(
+        (0..bodies)
+            .map(|i| Input {
+                actor: Actor::Admin,
+                action: Action::Spawn {
+                    components: BTreeMap::from([
+                        ("body".to_owned(), Value::Bool(true)),
+                        ("pos.x".to_owned(), Value::Num((i % side) as f64 * 1.1)),
+                        ("pos.y".to_owned(), Value::Num((i / side) as f64 * 1.1)),
+                        ("pos.z".to_owned(), Value::Num(3.0 + (i % 7) as f64)),
+                        ("vel.x".to_owned(), Value::Num((i % 5) as f64 - 2.0)),
+                        ("size".to_owned(), Value::Num(0.5)),
+                    ]),
+                },
+            })
+            .collect(),
+    );
+    let mut moved = 0;
+    let d = per_tick(|| moved = k.step(Vec::new()).touched.len(), 20);
+    row(
+        &format!("physics: {bodies} bodies falling and colliding"),
+        d,
+        format!("{moved} moved"),
+    );
 }
 
 fn battle(players: usize) {

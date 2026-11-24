@@ -17,6 +17,7 @@ pub struct Law {
     pub player_quota: Usage,
     pub ceiling: Budget,
     pub terrain: Terrain,
+    pub max_bodies: u32,
 }
 
 impl Default for Law {
@@ -41,6 +42,7 @@ impl Default for Law {
                 spawns_per_tick: 16,
             },
             terrain: Terrain::default(),
+            max_bodies: 2048,
         }
     }
 }

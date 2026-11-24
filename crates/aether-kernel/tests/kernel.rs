@@ -1010,7 +1010,7 @@ const GROUND: &str = r#"(module
     (call $set (i32.const 0) (i32.const 0) (i32.const 6) (call $ground (f64.const 137.5) (f64.const -912.25)))))"#;
 
 const NEAR: &str = r#"(module
-  (import "world" "near" (func $near (param i64 f64 f64 f64 i64) (result i64)))
+  (import "world" "near" (func $near (param i32 i32 i64 f64 f64 f64 i64) (result i64)))
   (import "world" "set_num" (func $set (param i32 i32 i32 f64)))
   (memory (export "memory") 1)
   (data (i32.const 0) "near")
@@ -1019,7 +1019,7 @@ const NEAR: &str = r#"(module
     (local.set $id (i64.const -1))
     (block $done
       (loop $next
-        (local.set $id (call $near (i64.const 0) (f64.const 0) (f64.const 0) (f64.const 10) (local.get $id)))
+        (local.set $id (call $near (i32.const 0) (i32.const 0) (i64.const 0) (f64.const 0) (f64.const 0) (f64.const 10) (local.get $id)))
         (br_if $done (i64.lt_s (local.get $id) (i64.const 0)))
         (local.set $n (f64.add (local.get $n) (f64.const 1)))
         (br $next)))
@@ -1096,6 +1096,19 @@ fn rules_fingerprint() {
         42,
     );
     let door = spawn(&mut k, Actor::Admin, &[("open", Value::Num(0.0))]);
+    for i in 0..4 {
+        spawn(
+            &mut k,
+            Actor::Admin,
+            &[
+                ("body", Value::Bool(true)),
+                ("pos.x", Value::Num(50.0 + f64::from(i) * 0.7)),
+                ("pos.y", Value::Num(3.0)),
+                ("pos.z", Value::Num(6.0 + f64::from(i))),
+                ("vel.x", Value::Num(-1.5)),
+            ],
+        );
+    }
     spawn(
         &mut k,
         player("ana"),
@@ -1155,8 +1168,8 @@ fn rules_fingerprint() {
     assert_eq!(
         (RULES, fingerprint.as_str()),
         (
-            "aether-rules/13",
-            "bce86f9de25d603500baee7654007654f4299a870da42bdca84c206fd3d61b36"
+            "aether-rules/14",
+            "2bc29787bdcdd2f641044cc452ec85bb23c418fd362dabed41c140180860b4a0"
         ),
         "the kernel's observable behaviour changed: if that is intended, bump RULES and update this fingerprint"
     );

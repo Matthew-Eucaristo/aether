@@ -38,6 +38,17 @@ pub(crate) struct HostState {
     pub emitted: Vec<Signal>,
     pub limits: StoreLimits,
     pub terrain: crate::terrain::Terrain,
+    pub near: Option<(Near, Vec<EntityId>)>,
+}
+
+#[derive(PartialEq)]
+pub(crate) struct Near {
+    key: String,
+    dim: i64,
+    x: u64,
+    y: u64,
+    r: u64,
+    stamp: (u32, u32),
 }
 
 impl Default for HostState {
@@ -61,6 +72,7 @@ impl Default for HostState {
             emitted: Vec::new(),
             limits: wasmtime::StoreLimitsBuilder::new().build(),
             terrain: crate::terrain::Terrain::default(),
+            near: None,
         }
     }
 }
@@ -525,6 +537,8 @@ pub(crate) fn linker(engine: &Engine) -> wasmtime::Result<Linker<HostState>> {
         "world",
         "near",
         |mut c: Caller<'_, HostState>,
+         kp: i32,
+         kl: i32,
          dim: i64,
          x: f64,
          y: f64,
@@ -532,11 +546,31 @@ pub(crate) fn linker(engine: &Engine) -> wasmtime::Result<Linker<HostState>> {
          after: i64|
          -> wasmtime::Result<i64> {
             charge(&mut c, COST_READ)?;
-            let after = u64::try_from(after).ok().map(EntityId);
-            let s = c.data();
-            let (found, examined) = s.txn.near(&s.world, dim, x, y, r, after);
-            charge(&mut c, examined)?;
-            Ok(found.map_or(-1, id_to_i64))
+            let key = if kl == 0 {
+                String::new()
+            } else {
+                deny(read_str(&mut c, kp, kl, MAX_KEY_LEN))?
+            };
+            let query = Near {
+                key,
+                dim,
+                x: x.to_bits(),
+                y: y.to_bits(),
+                r: r.to_bits(),
+                stamp: (c.data().writes_left, c.data().spawns_left),
+            };
+            if c.data().near.as_ref().is_none_or(|(q, _)| *q != query) {
+                let s = c.data();
+                let (found, examined) = s.txn.near(&s.world, &query.key, dim, x, y, r);
+                c.data_mut().near = Some((query, found));
+                charge(&mut c, examined)?;
+            }
+            let found = &c.data().near.as_ref().expect("cached above").1;
+            let next = match u64::try_from(after) {
+                Ok(after) => found.partition_point(|id| id.0 <= after),
+                Err(_) => 0,
+            };
+            Ok(found.get(next).map_or(-1, |id| id_to_i64(*id)))
         },
     )?;
 

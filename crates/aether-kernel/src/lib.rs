@@ -6,6 +6,7 @@ mod input;
 mod kernel;
 mod law;
 mod meter;
+mod physics;
 mod runtime;
 mod signal;
 mod terrain;

@@ -104,12 +104,7 @@ fn transactions_see_their_own_moves_when_searching_nearby() {
             rng.range(-200.0, 200.0),
             rng.range(0.0, 150.0),
         );
-        let mut seen = Vec::new();
-        let mut after = None;
-        while let (Some(id), _) = txn.near(&world, 0, x, y, r, after) {
-            seen.push(id);
-            after = Some(id);
-        }
+        let (seen, _) = txn.near(&world, "", 0, x, y, r);
         let mut expected: Vec<EntityId> = ids
             .iter()
             .chain(&fresh)

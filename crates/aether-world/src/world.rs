@@ -346,6 +346,10 @@ impl World {
         ids
     }
 
+    pub fn having(&self, key: &str) -> impl Iterator<Item = EntityId> + '_ {
+        self.derived.by_key.get(key).into_iter().flatten().copied()
+    }
+
     pub(crate) fn ids_with(&self, key: &str) -> Option<&BTreeSet<EntityId>> {
         self.derived.by_key.get(key)
     }
