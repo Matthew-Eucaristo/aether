@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
 use aether_kernel::{Action, Actor, Fault, Grant, Input, InputOutcome, Kernel};
@@ -54,16 +54,32 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "trial",
-            description: "Run a module on a private copy of the world without changing the real one. With capsule = -1 it installs the module as a new capsule with the given grants; with an existing capsule id it upgrades that capsule (grants are ignored). Then it runs the given number of ticks (at most 100) and reports install errors, faults, fuel, logs, and the entities the capsule created or changed with their components and motion. install and upgrade accept only a module that passed a clean trial.",
+            description: "Run a module on a private copy of the world without changing the real one. With capsule = -1 it installs the module as a new capsule with the given grants; with an existing capsule id it upgrades that capsule (grants are ignored). Then it runs the given number of ticks (at most 100), applying the given inputs as the person you act for, and reports install errors, faults, fuel, logs, signals the capsule's entities received, and the entities the capsule created or changed (and other changed entities such as health bars) with their components and motion. install and upgrade accept only a module that passed a clean trial.",
             schema: json!({
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["wat", "capsule", "grants", "ticks"],
+                "required": ["wat", "capsule", "grants", "ticks", "inputs"],
                 "properties": {
                     "wat": {"type": "string", "description": "Complete WAT module"},
                     "capsule": {"type": "integer"},
                     "grants": grants_schema(),
-                    "ticks": {"type": "integer"}
+                    "ticks": {"type": "integer"},
+                    "inputs": {
+                        "type": "array",
+                        "description": "What the person does during the trial, to test interaction: send a signal (for example fire to their avatar, use to a button) or set a component on an entity they own (for example weapon on their avatar). Tick 1 is the first tick after the install tick.",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["tick", "op", "entity", "name", "value"],
+                            "properties": {
+                                "tick": {"type": "integer"},
+                                "op": {"type": "string", "enum": ["signal", "set"]},
+                                "entity": {"type": "integer"},
+                                "name": {"type": "string", "description": "Signal name or component key"},
+                                "value": {"type": "number"}
+                            }
+                        }
+                    }
                 }
             }),
         },
@@ -129,6 +145,42 @@ pub struct TrialIn {
     pub capsule: i64,
     pub grants: Vec<GrantIn>,
     pub ticks: u32,
+    #[serde(default)]
+    pub inputs: Vec<TrialInput>,
+}
+
+#[derive(Deserialize)]
+pub struct TrialInput {
+    tick: u32,
+    op: TrialOp,
+    entity: u64,
+    name: String,
+    value: f64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TrialOp {
+    Signal,
+    Set,
+}
+
+impl TrialInput {
+    fn action(&self) -> Action {
+        let entity = EntityId(self.entity);
+        match self.op {
+            TrialOp::Signal => Action::Signal {
+                entity,
+                name: self.name.clone(),
+                value: self.value,
+            },
+            TrialOp::Set => Action::Set {
+                entity,
+                key: self.name.clone(),
+                value: Value::Num(self.value),
+            },
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -373,8 +425,30 @@ pub fn trial(k: &Kernel, actor: &Actor, input: &TrialIn) -> Trial {
     let start = owned(&fork);
     let mut reports = vec![first];
     let ticks = input.ticks.clamp(1, MAX_TRIAL_TICKS);
-    for _ in 1..ticks {
-        let r = fork.step(Vec::new());
+    let mut rejected = Vec::new();
+    let mut received: BTreeMap<String, usize> = BTreeMap::new();
+    for t in 1..ticks {
+        let inputs: Vec<Input> = input
+            .inputs
+            .iter()
+            .filter(|i| i.tick == t)
+            .map(|i| Input {
+                actor: actor.clone(),
+                action: i.action(),
+            })
+            .collect();
+        let mine: BTreeSet<EntityId> = owned(&fork).into_iter().map(|(e, _)| e).collect();
+        let r = fork.step(inputs);
+        for (n, outcome) in r.inputs.iter().enumerate() {
+            if let InputOutcome::Rejected(why) = outcome {
+                rejected.push(format!("tick {t} input {}: {why}", n + 1));
+            }
+        }
+        for sig in &r.signals {
+            if mine.contains(&sig.entity) {
+                *received.entry(sig.name.clone()).or_default() += 1;
+            }
+        }
         let stop = r.runs.iter().any(|run| run.capsule == id && run.suspended);
         reports.push(r);
         if stop {
@@ -430,6 +504,17 @@ pub fn trial(k: &Kernel, actor: &Actor, input: &TrialIn) -> Trial {
         for f in faults.iter().take(8) {
             let _ = writeln!(out, "  {f}");
         }
+    }
+    for r in rejected.iter().take(8) {
+        let _ = writeln!(out, "Rejected input: {r}");
+    }
+    if !received.is_empty() {
+        let list: Vec<String> = received.iter().map(|(n, c)| format!("{n} x{c}")).collect();
+        let _ = writeln!(
+            out,
+            "Signals the capsule's entities received: {}.",
+            list.join(", ")
+        );
     }
     if let (Some(min), Some(max)) = (fuel.iter().min(), fuel.iter().max()) {
         let _ = writeln!(

@@ -11,6 +11,7 @@ use serde_json::{Value as Json, json};
 
 const HELIX: &str = include_str!("../../../capsules/helix.wat");
 const THIEF: &str = include_str!("../../../capsules/thief.wat");
+const RIFLE: &str = include_str!("../../../capsules/rifle.wat");
 
 struct KernelBench(Mutex<Kernel>);
 
@@ -282,4 +283,80 @@ fn responses_are_parsed_with_their_stop_reasons() {
     assert!(matches!(parse_response(&refused), Err(HarnessError::Refused(c)) if c == "cyber"));
     let cut = json!({"stop_reason": "max_tokens", "content": []});
     assert!(matches!(parse_response(&cut), Err(HarnessError::Truncated)));
+}
+
+#[tokio::test]
+async fn trials_can_pull_the_trigger() {
+    let mut k = Kernel::new(Law::default(), 5);
+    let arena = k.add_blob(include_bytes!("../../../capsules/arena.wat").to_vec());
+    k.step(vec![Input {
+        actor: Actor::Admin,
+        action: aether_kernel::Action::Install {
+            wasm: arena,
+            grants: vec![],
+            budget: Law::default().ceiling,
+        },
+    }]);
+    let hub = k.state().capsules.values().next().unwrap().self_entity;
+    let mut avatars = Vec::new();
+    for (name, x) in [("ana", 0.0), ("budi", 6.0)] {
+        let components = [
+            ("avatar", Value::Bool(true)),
+            ("pos.x", Value::Num(x)),
+            ("pos.y", Value::Num(0.0)),
+            ("pos.z", Value::Num(0.9)),
+            ("aim.x", Value::Num(1.0)),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v))
+        .collect();
+        let r = k.step(vec![Input {
+            actor: Actor::Player(PlayerId(name.into())),
+            action: aether_kernel::Action::Spawn { components },
+        }]);
+        let InputOutcome::Spawned(id) = r.inputs[0] else {
+            panic!("{:?}", r.inputs[0])
+        };
+        k.step(vec![Input {
+            actor: Actor::Player(PlayerId(name.into())),
+            action: aether_kernel::Action::Signal {
+                entity: hub,
+                name: "join".into(),
+                value: id.0 as f64,
+            },
+        }]);
+        avatars.push(id);
+    }
+    let ana = avatars[0].0;
+    let mut inputs =
+        vec![json!({"tick": 1, "op": "set", "entity": ana, "name": "weapon", "value": 1})];
+    for t in 2..12 {
+        inputs.push(json!({"tick": t, "op": "signal", "entity": ana, "name": "fire", "value": 1}));
+    }
+    let bench = KernelBench(Mutex::new(k));
+    let model = Scripted::new(vec![
+        call(
+            "1",
+            "trial",
+            json!({"wat": RIFLE, "capsule": -1, "grants": [{"entity": ana, "write": false}], "ticks": 20, "inputs": inputs}),
+        ),
+        say("done"),
+    ]);
+    realize(
+        &model,
+        &bench,
+        Actor::Player(PlayerId("ana".into())),
+        "rifle",
+        |_| {},
+    )
+    .await
+    .unwrap();
+    let seen = model.seen.lock().unwrap();
+    let Some(Message::ToolResults(r)) = seen[1].last() else {
+        panic!()
+    };
+    let report = &r[0].content;
+    assert!(!r[0].is_error, "{report}");
+    assert!(report.contains("received: hit x"), "{report}");
+    assert!(report.contains("health="), "{report}");
 }

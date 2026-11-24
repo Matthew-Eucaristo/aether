@@ -11,9 +11,11 @@ pub const GUIDE: &str = concat!(
 - The renderer reads these conventions: pos.x and pos.y place an entity on the ground plane, pos.z is its height, one unit is about one metre, and the view shows roughly -20 to 20. color is a text "#rrggbb". size is the radius (default 0.28). An entity without pos.x is invisible state.
 - A number array component named points is drawn as particles: it holds x, y, z triples relative to the entity's position, each drawn with the entity's size and color. Thousands of particles in one array are cheap; thousands of separate entities are not.
 - shape is "sphere" (default), "box" or "cylinder". A sphere's size is its radius; a box or cylinder spans scale.x, scale.y and scale.z metres (cylinders stand along z). rot.x, rot.y and rot.z rotate it in radians about its centre, so a door that swings on a hinge must move its centre as well as its rot.z.
+- dir.x, dir.y and dir.z point an entity along a direction instead of rot: a box or sphere lays its x axis (its scale.x length) along it, a cylinder its axis. Use it for guns, missiles, arrows and anything that faces where it moves.
+- solid false marks a box that bullets and walking people pass through (held items, effects). Every other box with a position is solid.
 - glow (0 to about 2) makes a surface emit its colour. light (an intensity such as 5 to 10) turns the entity into a point light that really lights the things around it, in its colour.
 - label is a text shown above the entity; use it for signs, screens and displays (newlines work).
-- Sound: sound.freq (Hz) makes the entity hum, positioned in 3D; sound.wave is "sine", "square", "saw" or "triangle"; sound.gain is 0 to 1 (default 0.15); sound.on (bool) silences it without forgetting the settings. Change sound.freq from tick to tick to play melodies, and switch sound.on on for one tick for clicks and beeps.
+- Sound: sound.freq (Hz) makes the entity hum, positioned in 3D; sound.wave is "sine", "square", "saw", "triangle" or "noise" (hiss, shots and explosions; sound.freq is then its brightness, 200 dull boom to 4000 sharp crack); sound.gain is 0 to 1 (default 0.15); sound.on (bool) silences it without forgetting the settings. Change sound.freq from tick to tick to play melodies, and switch sound.on on for one tick for clicks and beeps.
 - The look component selects a special appearance: "blackhole" draws a black core with photon rings, "accretion" makes points glow from white-hot near the centre to orange at the edge. Keep moving things within about ±10 so people can see them.
 
 # Capabilities: what a capsule may touch
@@ -31,6 +33,19 @@ pub const GUIDE: &str = concat!(
 
 - Each tick a capsule gets a fuel budget (every wasm instruction costs about 1 fuel, plus the host-call costs below), a write budget, a spawn budget and a memory limit, all set by the region law (shown in the context). Bulk memory instructions cost 1 fuel per byte; initialising data segments costs 1 fuel per byte every tick.
 - Running out of fuel, a trap, recursion beyond the deterministic call-depth limit, or a denied host call is a fault. A fault discards every write that capsule made in that tick. After a few faults in a row the capsule is suspended until someone resumes it.
+
+# People, avatars and equipment
+
+- A person who plays has an avatar: an entity they own with avatar = true, pos.x, pos.y, pos.z (the middle of the body, 0.9 above the feet; the body is a 0.7 wide, 1.8 tall cylinder), aim.x, aim.y, aim.z (unit vector where they aim) and weapon (the slot 1 to 9 they selected with the number keys). Find it with look, key avatar and owner player:<name>.
+- While a person holds the mouse button, their client sends the signal fire to their avatar every tick, with the selected slot as value.
+- Equipment (guns, tools, jetpacks, shields) is a capsule the person installs with a read grant on their avatar, so handle 1 is the avatar. Start every tick with (call $entity (i32.const 1)) and check that it has aim.x; if not, return before spawning anything. Pick a slot their other equipment does not use (read their capsules) and tell them which number key selects it. Draw the held item only while weapon equals your slot (put it on their back otherwise), and act on fire only when weapon equals your slot and signal_from equals the avatar's owner, so nobody else can pull the trigger.
+- Combat goes through the arena, an admin capsule whose entity has arena = true. People join it from their client. Each tick it checks every entity with a projectile component against the avatars, against solid boxes and against the ground:
+  - projectile is the damage of a hit (at most 25); vel.x, vel.y, vel.z must be exactly how far you move the projectile each tick (at most 10 metres per axis); from is the shooter's avatar id (it is never hit by its own projectile); blast (optional, at most 6) is a splash radius in metres, with damage falling off to 0 at the edge; boom = true makes it detonate where it is.
+  - On impact the arena sends the projectile the signals hx, hy and hz (the impact point) and then hit (value: the avatar hit, or -1 for a wall or the ground). They arrive the next tick: then despawn the projectile and draw the effect at hx, hy, hz.
+  - Damage is limited per owner (80 at once, refilling 8 per tick), so firing faster than that adds nothing. Every projectile needs a lifetime: despawn it after a few seconds even if it never hits.
+  - For each joined person the arena keeps a health bar entity with of = their avatar id, health (0 to 100), dead (ticks until respawn) and deaths. Read them to build things that react to the fight.
+- Test equipment with trial inputs: set weapon on the avatar to your slot at tick 1, then send fire to the avatar on the following ticks, and check in the report that projectiles were created, moved and received hit signals, and that health bars changed if someone stood in the line of fire.
+- Explosions read well as a sphere whose size grows over 6 to 10 ticks while its glow and light fade, plus sound.wave noise, plus a points array of sparks flying outwards. Spend at most 2 spawns per explosion.
 
 # The module you write
 
@@ -77,7 +92,7 @@ Costs in fuel: get_nums and set_nums cost 1 per number on top of a read or write
 # Patterns that work
 
 - Set up once, then update: on each tick check (call $kind (call $self) key) for a marker such as "init" or "first". When it is 0, spawn what you need and store the handles as numbers on handle 0. Every later tick, read the stored handle back with i32.trunc_f64_s and use (call $entity handle) to get the id for reading.
-- Handles returned by consecutive spawn() calls in one capsule are consecutive, so storing the first handle and a count is enough.
+- In the setup tick, consecutive spawn() calls return consecutive handles. Despawning frees a handle and a later spawn may reuse it, so for things you create and destroy over time (bullets, effects) store every live handle, for example in a number array on handle 0.
 - To read your own state use (call $self) as the id; to read a spawned entity use (call $entity handle); to read anything else use its id from the context, from look, or from find.
 - Discover entities with a loop: start with after = -1, call find, stop when the result is negative.
 - There is no math library. f64.sqrt, f64.abs, f64.floor, f64.ceil, f64.nearest, f64.min and f64.max are instructions. For circles and orbits rotate a vector by a fixed angle each tick with precomputed constants: x' = x*c - y*s, y' = x*s + y*c, where c = cos(angle) and s = sin(angle) written as literals (for 0.05 rad: c = 0.9987502603949663, s = 0.04997916927067833). Use short Taylor series when you need sin of a varying value.
@@ -109,5 +124,11 @@ Costs in fuel: get_nums and set_nums cost 1 per number on top of a read or write
 # A complete example: eight entities climbing a helix
 
 "##,
-    include_str!("../../../capsules/helix.wat")
+    include_str!("../../../capsules/helix.wat"),
+    r##"
+
+# A complete example: equipment, a rifle on slot 1
+
+"##,
+    include_str!("../../../capsules/rifle.wat")
 );
