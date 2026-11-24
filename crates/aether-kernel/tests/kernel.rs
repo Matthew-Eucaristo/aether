@@ -966,7 +966,7 @@ fn freed_handles_are_reused_so_emitters_run_forever() {
     );
     for r in run(&mut k, 3) {
         assert!(
-            matches!(fault_of(&r, churn), Some(_)),
+            fault_of(&r, churn).is_some(),
             "the list holds 7 live entities, so a second live spawn has no slot"
         );
     }

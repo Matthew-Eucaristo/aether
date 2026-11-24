@@ -558,7 +558,7 @@ async fn main() {
         () = stop_requested() => {}
     }
     let (done, stopped) = oneshot::channel();
-    let _ = tokio::task::spawn_blocking(move || stopper.send(Request::Stop(done))).await;
+    let _ = tokio::task::spawn_blocking(move || stopper.send(Request::Stop(done)).is_ok()).await;
     let _ = stopped.await;
 }
 
