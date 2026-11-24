@@ -89,8 +89,7 @@ fn wire_entity(e: &Entity, halfs: &mut Vec<u16>) -> serde_json::Value {
 enum Request {
     Stop(oneshot::Sender<()>),
     Join {
-        actor: Actor,
-        reply: oneshot::Sender<(String, broadcast::Receiver<Update>)>,
+        reply: oneshot::Sender<(Arc<str>, broadcast::Receiver<Update>)>,
     },
     Act {
         input: Input,
@@ -110,11 +109,6 @@ enum Request {
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ServerMsg<'a> {
-    Hello {
-        you: &'a Actor,
-        state: &'a aether_kernel::State,
-        head: BlobHash,
-    },
     Tick {
         report: &'a aether_kernel::TickReport,
         inputs: &'a [Input],
@@ -138,6 +132,20 @@ enum ServerMsg<'a> {
     HarnessFailed {
         error: String,
     },
+    Rejected {
+        error: String,
+    },
+}
+
+#[derive(Serialize)]
+struct World<'a> {
+    state: &'a aether_kernel::State,
+    head: BlobHash,
+}
+
+fn hello(you: &Actor, world: &str) -> String {
+    let you = serde_json::to_string(you).expect("actors serialize");
+    format!("{{\"type\":\"hello\",\"you\":{you},{}", &world[1..])
 }
 
 #[derive(Deserialize)]
@@ -218,13 +226,19 @@ fn world_loop(
     loop {
         let mut inputs = Vec::new();
         let mut waiting: Vec<(usize, oneshot::Sender<InputOutcome>)> = Vec::new();
+        let mut world: Option<Arc<str>> = None;
+        let mut served = 0usize;
         loop {
             let timeout = next.saturating_duration_since(Instant::now());
+            if timeout.is_zero() && served > 0 {
+                break;
+            }
             let request = match requests.recv_timeout(timeout) {
                 Ok(r) => r,
                 Err(mpsc::RecvTimeoutError::Timeout) => break,
                 Err(mpsc::RecvTimeoutError::Disconnected) => return,
             };
+            served += 1;
             match request {
                 Request::Stop(done) => {
                     match store.checkpoint() {
@@ -234,16 +248,20 @@ fn world_loop(
                     let _ = done.send(());
                     return;
                 }
-                Request::Join { actor, reply } => {
+                Request::Join { reply } => {
                     let receiver = updates.subscribe();
                     let k = store.kernel();
-                    let hello = serde_json::to_string(&ServerMsg::Hello {
-                        you: &actor,
-                        state: k.state(),
-                        head: k.state_hash(),
-                    })
-                    .expect("state serializes");
-                    let _ = reply.send((hello, receiver));
+                    let world = world
+                        .get_or_insert_with(|| {
+                            serde_json::to_string(&World {
+                                state: k.state(),
+                                head: k.state_hash(),
+                            })
+                            .expect("state serializes")
+                            .into()
+                        })
+                        .clone();
+                    let _ = reply.send((world, receiver));
                 }
                 Request::Blob { hash, reply } => {
                     let _ = reply.send(store.kernel().blobs().get(&hash).cloned());
@@ -372,20 +390,17 @@ async fn send_busy(socket: &mut WebSocket) -> Result<(), axum::Error> {
 
 async fn session(mut socket: WebSocket, actor: Actor, app: App) {
     let (reply, joined) = oneshot::channel();
-    if app
-        .requests
-        .try_send(Request::Join {
-            actor: actor.clone(),
-            reply,
-        })
-        .is_err()
-    {
+    if app.requests.try_send(Request::Join { reply }).is_err() {
         return;
     }
-    let Ok((hello, mut updates)) = joined.await else {
+    let Ok((world, mut updates)) = joined.await else {
         return;
     };
-    if socket.send(Message::text(hello)).await.is_err() {
+    if socket
+        .send(Message::text(hello(&actor, &world)))
+        .await
+        .is_err()
+    {
         return;
     }
     let (harness_tx, mut harness_rx) = tokio::sync::mpsc::unbounded_channel::<(String, bool)>();
@@ -400,9 +415,27 @@ async fn session(mut socket: WebSocket, actor: Actor, app: App) {
                 };
                 match serde_json::from_str::<ClientMsg>(text.as_str()) {
                     Ok(ClientMsg::Act { action }) => {
+                        let (reply, outcome) = match action.blob() {
+                            Some(_) => {
+                                let (reply, outcome) = oneshot::channel();
+                                (Some(reply), Some(outcome))
+                            }
+                            None => (None, None),
+                        };
                         let input = Input { actor: actor.clone(), action };
-                        match app.requests.try_send(Request::Act { input, reply: None }) {
-                            Ok(()) => {}
+                        match app.requests.try_send(Request::Act { input, reply }) {
+                            Ok(()) => {
+                                if let Some(outcome) = outcome {
+                                    let tx = harness_tx.clone();
+                                    tokio::spawn(async move {
+                                        if let Ok(InputOutcome::Rejected(error)) = outcome.await {
+                                            let msg = serde_json::to_string(&ServerMsg::Rejected { error })
+                                                .expect("rejections serialize");
+                                            let _ = tx.send((msg, false));
+                                        }
+                                    });
+                                }
+                            }
                             Err(mpsc::TrySendError::Full(_)) => {
                                 if send_busy(&mut socket).await.is_err() {
                                     return;
@@ -470,7 +503,13 @@ async fn session(mut socket: WebSocket, actor: Actor, app: App) {
                             }
                         }
                     }
-                    Err(e) => eprintln!("ignored a malformed client message: {e}"),
+                    Err(e) => {
+                        let msg = serde_json::to_string(&ServerMsg::Rejected { error: format!("malformed message: {e}") })
+                            .expect("rejections serialize");
+                        if socket.send(Message::text(msg)).await.is_err() {
+                            return;
+                        }
+                    }
                 }
             }
             Some((msg, finished)) = harness_rx.recv() => {
@@ -486,12 +525,12 @@ async fn session(mut socket: WebSocket, actor: Actor, app: App) {
                     Ok(update) => update,
                     Err(broadcast::error::RecvError::Lagged(_)) => {
                         let (reply, joined) = oneshot::channel();
-                        if app.requests.try_send(Request::Join { actor: actor.clone(), reply }).is_err() {
+                        if app.requests.try_send(Request::Join { reply }).is_err() {
                             return;
                         }
-                        let Ok((hello, fresh)) = joined.await else { return };
+                        let Ok((world, fresh)) = joined.await else { return };
                         updates = fresh;
-                        if socket.send(Message::text(hello)).await.is_err() {
+                        if socket.send(Message::text(hello(&actor, &world))).await.is_err() {
                             return;
                         }
                         continue;
@@ -528,6 +567,10 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
         .unwrap_or_else(|e| panic!("cannot listen on port {port}: {e}"));
+    let port = listener
+        .local_addr()
+        .expect("a bound listener has an address")
+        .port();
 
     let store = if dir.join("snapshot.json").exists() {
         Store::open(&dir)

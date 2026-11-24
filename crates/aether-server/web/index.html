@@ -317,6 +317,8 @@ const onMessage = (ev) => {
   } else if (msg.type === "harness_failed") {
     harnessLine(`<div class="fail">${esc(msg.error)}</div>`);
     $("realize").disabled = false;
+  } else if (msg.type === "rejected") {
+    event(`rejected: ${msg.error}`, "bad");
   } else if (msg.type === "busy") {
     event("the world is busy; that request was dropped", "bad");
   } else if (msg.type === "uploaded") {
