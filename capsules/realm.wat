@@ -53,7 +53,6 @@
   (data (i32.const 200) "#4ade80")
   (data (i32.const 208) "#ef4444")
   (data (i32.const 216) "glow")
-  (data (i32.const 224) "cursor")
   (data (i32.const 232) "health")
   (data (i32.const 240) "ammo")
   (data (i32.const 248) "dead")
@@ -113,7 +112,8 @@
   (global $ROSTER i32 (i32.const 4096))
   (global $STRIDE i32 (i32.const 160))
   (global $FIELDS i32 (i32.const 20))
-  (global $SPENT i32 (i32.const 10240))
+  (global $SPENT i32 (i32.const 49152))
+  (global $MAXSPENT i32 (i32.const 1024))
   (global $AMMO i32 (i32.const 11264))
   (global $TEXT i32 (i32.const 12288))
   (global $FEED i32 (i32.const 15360))
@@ -302,6 +302,13 @@
         (call $feed (local.get $fi) (local.get $i)))
       (else (call $feed (i32.const -1) (local.get $i)))))
 
+  (func $truthy (param $id i64) (param $k i32) (param $l i32) (result i32)
+    (local $t i32)
+    (local.set $t (call $kind (local.get $id) (local.get $k) (local.get $l)))
+    (if (i32.eq (local.get $t) (i32.const 3)) (then (return (call $get_bool (local.get $id) (local.get $k) (local.get $l)))))
+    (if (i32.eq (local.get $t) (i32.const 1)) (then (return (f64.ne (call $get (local.get $id) (local.get $k) (local.get $l)) (f64.const 0)))))
+    (i32.ne (local.get $t) (i32.const 0)))
+
   (func $splash (param $x f64) (param $y f64) (param $z f64) (param $r f64) (param $dmg f64)
                 (param $skip i32) (param $fi i32) (param $key f64)
     (local $i i32) (local $e i32) (local $dx f64) (local $dy f64) (local $dz f64) (local $d f64)
@@ -309,7 +316,7 @@
     (block $done
       (loop $each
         (br_if $done (i32.ge_u (local.get $i) (global.get $n)))
-        (if (i32.ne (local.get $i) (local.get $skip))
+        (if (i32.and (i32.ne (local.get $i) (local.get $skip)) (i32.ne (local.get $i) (local.get $fi)))
           (then
             (local.set $e (call $entry (local.get $i)))
             (local.set $dx (f64.sub (f64.load offset=56 (local.get $e)) (local.get $x)))
@@ -772,14 +779,25 @@
     (call $hash (global.get $C) (local.get $len)))
 
   (func $projectiles
-    (local $p i64) (local $count i32) (local $cursor i32)
+    (local $p i64) (local $count i32) (local $kept i32) (local $id f64)
     (local $dmg f64) (local $blast f64) (local $from f64) (local $key f64) (local $fi i32)
     (local $px f64) (local $py f64) (local $pz f64) (local $vx f64) (local $vy f64) (local $vz f64)
     (local $sx f64) (local $sy f64) (local $sz f64) (local $dd f64)
     (local $i i32) (local $e i32) (local $best f64) (local $bi i32) (local $t f64)
     (local $qx f64) (local $qy f64) (local $qz f64) (local $victim f64) (local $tw f64) (local $j i32) (local $spent i32)
-    (local.set $count (call $nums (global.get $me) (i32.const 136) (i32.const 5) (global.get $SPENT) (i32.const 64)))
-    (local.set $cursor (i32.trunc_sat_f64_s (call $num (global.get $me) (i32.const 224) (i32.const 6) (f64.const 0))))
+    (local.set $count (call $nums (global.get $me) (i32.const 136) (i32.const 5) (global.get $SPENT) (global.get $MAXSPENT)))
+    (local.set $j (i32.const 0))
+    (block $pruned
+      (loop $prune
+        (br_if $pruned (i32.ge_u (local.get $j) (local.get $count)))
+        (local.set $id (f64.load (i32.add (global.get $SPENT) (i32.shl (local.get $j) (i32.const 3)))))
+        (if (call $exists (i64.trunc_sat_f64_s (local.get $id)))
+          (then
+            (f64.store (i32.add (global.get $SPENT) (i32.shl (local.get $kept) (i32.const 3))) (local.get $id))
+            (local.set $kept (i32.add (local.get $kept) (i32.const 1)))))
+        (local.set $j (i32.add (local.get $j) (i32.const 1)))
+        (br $prune)))
+    (local.set $count (local.get $kept))
     (local.set $p (i64.const -1))
     (block $done
       (loop $next
@@ -861,21 +879,24 @@
                     (local.set $py (f64.add (local.get $sy) (f64.mul (local.get $vy) (local.get $tw))))
                     (local.set $pz (f64.add (local.get $sz) (f64.mul (local.get $vz) (local.get $tw))))))))
             (if (i32.or (i32.or (i32.ge_s (local.get $bi) (i32.const 0)) (f64.le (local.get $tw) (f64.const 1)))
-                        (i32.ne (call $kind (local.get $p) (i32.const 96) (i32.const 4)) (i32.const 0)))
+                        (call $truthy (local.get $p) (i32.const 96) (i32.const 4)))
               (then
                 (call $splash (local.get $px) (local.get $py) (local.get $pz) (local.get $blast) (local.get $dmg)
                   (local.get $bi) (local.get $fi) (local.get $key))
-                (f64.store (i32.add (global.get $SPENT) (i32.shl (i32.rem_u (local.get $cursor) (i32.const 64)) (i32.const 3)))
+                (if (i32.ge_u (local.get $count) (global.get $MAXSPENT))
+                  (then
+                    (memory.copy (global.get $SPENT) (i32.add (global.get $SPENT) (i32.const 8))
+                      (i32.shl (i32.sub (local.get $count) (i32.const 1)) (i32.const 3)))
+                    (local.set $count (i32.sub (local.get $count) (i32.const 1)))))
+                (f64.store (i32.add (global.get $SPENT) (i32.shl (local.get $count) (i32.const 3)))
                   (f64.convert_i64_s (local.get $p)))
-                (local.set $cursor (i32.add (local.get $cursor) (i32.const 1)))
-                (if (i32.lt_u (local.get $count) (i32.const 64)) (then (local.set $count (i32.add (local.get $count) (i32.const 1)))))
+                (local.set $count (i32.add (local.get $count) (i32.const 1)))
                 (call $emit (local.get $p) (i32.const 344) (i32.const 2) (local.get $px))
                 (call $emit (local.get $p) (i32.const 352) (i32.const 2) (local.get $py))
                 (call $emit (local.get $p) (i32.const 360) (i32.const 2) (local.get $pz))
                 (call $emit (local.get $p) (i32.const 112) (i32.const 3) (local.get $victim))))))
         (br $next)))
-    (call $set_nums (i32.const 0) (i32.const 136) (i32.const 5) (global.get $SPENT) (local.get $count))
-    (call $set (i32.const 0) (i32.const 224) (i32.const 6) (f64.convert_i32_u (i32.rem_u (local.get $cursor) (i32.const 64)))))
+    (call $set_nums (i32.const 0) (i32.const 136) (i32.const 5) (global.get $SPENT) (local.get $count)))
 
   (func $ammo
     (local $i i32) (local $j i32) (local $p i32) (local $t f64)
@@ -969,8 +990,11 @@
           (then
             (f64.store offset=48 (local.get $e) (f64.sub (f64.load offset=48 (local.get $e)) (f64.const 1)))
             (f64.store offset=128 (local.get $e) (f64.const 1))
+            (call $set (i32.trunc_sat_f64_s (f64.load offset=8 (local.get $e))) (i32.const 456) (i32.const 6) (f64.const 0))
             (if (f64.le (f64.load offset=48 (local.get $e)) (f64.const 0))
-              (then (call $respawn (local.get $e))))))
+              (then
+                (call $set (i32.trunc_sat_f64_s (f64.load offset=8 (local.get $e))) (i32.const 456) (i32.const 6) (f64.const 1))
+                (call $respawn (local.get $e))))))
         (call $move (local.get $i))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $each)))

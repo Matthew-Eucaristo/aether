@@ -16,7 +16,9 @@
   (import "world" "signal_entity" (func $signal_entity (param i32) (result i64)))
   (import "world" "signal_value" (func $signal_value (param i32) (result f64)))
   (import "world" "signal_from" (func $signal_from (param i32 i32 i32) (result i32)))
+  (import "world" "owner" (func $owner (param i64 i32 i32) (result i32)))
   (memory (export "memory") 1)
+  (global $body (mut i64) (i64.const -1))
   (data (i32.const 0) "init")
   (data (i32.const 8) "tube")
   (data (i32.const 16) "live")
@@ -96,6 +98,21 @@
         (br $cmp)))
     (i32.const 1))
 
+  (func $official (param $s i32) (result i32)
+    (call $same (call $signal_from (local.get $s) (i32.const 512) (i32.const 64))
+                (call $owner (global.get $body) (i32.const 576) (i32.const 64))))
+
+  (func $official_find (param $name i32) (param $len i32) (param $id i64) (result i32)
+    (local $s i32)
+    (local.set $s (i32.const -1))
+    (block $none
+      (loop $next
+        (local.set $s (call $signal_find (local.get $name) (local.get $len) (local.get $id) (local.get $s)))
+        (br_if $none (i32.lt_s (local.get $s) (i32.const 0)))
+        (if (call $official (local.get $s)) (then (return (local.get $s))))
+        (br $next)))
+    (i32.const -1))
+
   (func $place (param $h i32) (param $x f64) (param $y f64) (param $z f64)
     (call $set (local.get $h) (i32.const 48) (i32.const 5) (local.get $x))
     (call $set (local.get $h) (i32.const 56) (i32.const 5) (local.get $y))
@@ -108,7 +125,7 @@
 
   (func $signal (param $name i32) (param $id i64) (param $d f64) (result f64)
     (local $s i32)
-    (local.set $s (call $signal_find (local.get $name) (i32.const 2) (local.get $id) (i32.const -1)))
+    (local.set $s (call $official_find (local.get $name) (i32.const 2) (local.get $id)))
     (if (result f64) (i32.lt_s (local.get $s) (i32.const 0))
       (then (local.get $d))
       (else (call $signal_value (local.get $s)))))
@@ -188,6 +205,7 @@
     (local $x f64) (local $y f64) (local $z f64) (local $vx f64) (local $vy f64) (local $vz f64)
     (local.set $me (call $self))
     (local.set $av (call $entity (i32.const 1)))
+    (global.set $body (local.get $av))
     (if (i32.or (i32.eqz (call $kind (local.get $av) (i32.const 24) (i32.const 5)))
                 (i32.ne (call $kind (local.get $av) (i32.const 400) (i32.const 6)) (i32.const 2)))
       (then
@@ -263,7 +281,7 @@
         (local.set $y (call $get (local.get $id) (i32.const 56) (i32.const 5)))
         (local.set $z (call $get (local.get $id) (i32.const 64) (i32.const 5)))
         (local.set $ttl (f64.sub (f64.load offset=8 (local.get $p)) (f64.const 1)))
-        (local.set $s (call $signal_find (i32.const 112) (i32.const 3) (local.get $id) (i32.const -1)))
+        (local.set $s (call $official_find (i32.const 112) (i32.const 3) (local.get $id)))
         (if (i32.or (i32.ge_s (local.get $s) (i32.const 0)) (f64.le (local.get $ttl) (f64.const 0)))
           (then
             (call $explode

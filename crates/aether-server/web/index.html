@@ -1750,6 +1750,8 @@ function playNet() {
   sendIntent(av, "ax", aim[0], 0.01);
   sendIntent(av, "ay", aim[1], 0.01);
   sendIntent(av, "az", aim[2], 0.01);
+  const held = num(world.entities.get(av), "weapon");
+  if (held >= 1 && held !== play.weapon) delete play.sent.weapon;
   sendIntent(av, "weapon", play.weapon, 0.5);
   if (play.firing && play.locked) signal(av, "fire", play.weapon);
 }

@@ -15,8 +15,10 @@
   (import "world" "signal_find" (func $signal_find (param i32 i32 i64 i32) (result i32)))
   (import "world" "signal_entity" (func $signal_entity (param i32) (result i64)))
   (import "world" "signal_from" (func $signal_from (param i32 i32 i32) (result i32)))
+  (import "world" "owner" (func $owner (param i64 i32 i32) (result i32)))
   (import "world" "random" (func $random (result i64)))
   (memory (export "memory") 1)
+  (global $body (mut i64) (i64.const -1))
   (data (i32.const 0) "init")
   (data (i32.const 8) "gun")
   (data (i32.const 16) "live")
@@ -86,6 +88,21 @@
         (br $cmp)))
     (i32.const 1))
 
+  (func $official (param $s i32) (result i32)
+    (call $same (call $signal_from (local.get $s) (i32.const 512) (i32.const 64))
+                (call $owner (global.get $body) (i32.const 576) (i32.const 64))))
+
+  (func $official_find (param $name i32) (param $len i32) (param $id i64) (result i32)
+    (local $s i32)
+    (local.set $s (i32.const -1))
+    (block $none
+      (loop $next
+        (local.set $s (call $signal_find (local.get $name) (local.get $len) (local.get $id) (local.get $s)))
+        (br_if $none (i32.lt_s (local.get $s) (i32.const 0)))
+        (if (call $official (local.get $s)) (then (return (local.get $s))))
+        (br $next)))
+    (i32.const -1))
+
   (func $place (param $h i32) (param $x f64) (param $y f64) (param $z f64)
     (call $set (local.get $h) (i32.const 48) (i32.const 5) (local.get $x))
     (call $set (local.get $h) (i32.const 56) (i32.const 5) (local.get $y))
@@ -104,6 +121,7 @@
     (local $vx f64) (local $vy f64) (local $vz f64)
     (local.set $me (call $self))
     (local.set $av (call $entity (i32.const 1)))
+    (global.set $body (local.get $av))
     (if (i32.or (i32.eqz (call $kind (local.get $av) (i32.const 24) (i32.const 5)))
                 (i32.ne (call $kind (local.get $av) (i32.const 344) (i32.const 6)) (i32.const 2))) (then (return)))
     (if (i32.eqz (call $kind (local.get $me) (i32.const 0) (i32.const 4)))
@@ -165,14 +183,16 @@
         (br_if $hits (i32.lt_s (local.get $s) (i32.const 0)))
         (local.set $id (call $signal_entity (local.get $s)))
         (local.set $i (i32.const 0))
-        (block $found
-          (loop $scan
-            (br_if $found (i32.ge_u (local.get $i) (local.get $n)))
-            (local.set $p (i32.add (global.get $LIVE) (i32.shl (local.get $i) (i32.const 4))))
-            (if (i64.eq (call $entity (i32.trunc_sat_f64_s (f64.load (local.get $p)))) (local.get $id))
-              (then (f64.store offset=8 (local.get $p) (f64.const 0))))
-            (local.set $i (i32.add (local.get $i) (i32.const 1)))
-            (br $scan)))
+        (if (call $official (local.get $s))
+          (then
+            (block $found
+              (loop $scan
+                (br_if $found (i32.ge_u (local.get $i) (local.get $n)))
+                (local.set $p (i32.add (global.get $LIVE) (i32.shl (local.get $i) (i32.const 4))))
+                (if (i64.eq (call $entity (i32.trunc_sat_f64_s (f64.load (local.get $p)))) (local.get $id))
+                  (then (f64.store offset=8 (local.get $p) (f64.const 0))))
+                (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                (br $scan)))))
         (br $next)))
 
     (local.set $i (i32.const 0))
