@@ -12,7 +12,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-pub use claude::{Claude, parse_response, request_body};
+pub use claude::{Claude, Stream, parse_response, request_body};
 pub use guide::GUIDE;
 pub use model::{Message, Model, ToolCall, ToolResult, ToolSpec, Turn};
 

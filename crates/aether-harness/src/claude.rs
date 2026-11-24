@@ -37,7 +37,8 @@ pub fn request_body(
                 "name": t.name,
                 "description": t.description,
                 "input_schema": t.schema,
-                "strict": true
+                "strict": true,
+                "eager_input_streaming": true
             })
         })
         .collect();
@@ -59,7 +60,8 @@ pub fn request_body(
         .collect();
     let mut body = json!({
         "model": model,
-        "max_tokens": 16000,
+        "max_tokens": 64000,
+        "stream": true,
         "system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
         "tools": tools,
         "messages": messages,
@@ -105,6 +107,104 @@ pub fn parse_response(response: &Value) -> Result<Turn, HarnessError> {
         text,
         calls,
     })
+}
+
+#[derive(Default)]
+pub struct Stream {
+    message: Value,
+    partial: Vec<String>,
+    buffer: String,
+}
+
+impl Stream {
+    pub fn push(&mut self, chunk: &str) -> Result<(), HarnessError> {
+        self.buffer.push_str(&chunk.replace("\r\n", "\n"));
+        while let Some(end) = self.buffer.find("\n\n") {
+            let event: String = self.buffer.drain(..end + 2).collect();
+            let data: Vec<&str> = event
+                .lines()
+                .filter_map(|l| l.strip_prefix("data:"))
+                .map(str::trim_start)
+                .collect();
+            if data.is_empty() {
+                continue;
+            }
+            let json: Value = serde_json::from_str(&data.join("\n"))
+                .map_err(|e| HarnessError::Network(format!("bad stream event: {e}")))?;
+            self.apply(&json)?;
+        }
+        Ok(())
+    }
+
+    fn apply(&mut self, event: &Value) -> Result<(), HarnessError> {
+        let index = event["index"].as_u64().unwrap_or(0) as usize;
+        match event["type"].as_str().unwrap_or_default() {
+            "message_start" => self.message = event["message"].clone(),
+            "content_block_start" => {
+                let content = self.message["content"]
+                    .as_array_mut()
+                    .ok_or_else(|| HarnessError::Network("content before message_start".into()))?;
+                if content.len() <= index {
+                    content.resize(index + 1, Value::Null);
+                }
+                content[index] = event["content_block"].clone();
+                if self.partial.len() <= index {
+                    self.partial.resize(index + 1, String::new());
+                }
+            }
+            "content_block_delta" => {
+                let delta = &event["delta"];
+                let block = &mut self.message["content"][index];
+                match delta["type"].as_str().unwrap_or_default() {
+                    "text_delta" => append(block, "text", &delta["text"]),
+                    "thinking_delta" => append(block, "thinking", &delta["thinking"]),
+                    "signature_delta" => block["signature"] = delta["signature"].clone(),
+                    "input_json_delta" => {
+                        if let Some(p) = self.partial.get_mut(index) {
+                            p.push_str(delta["partial_json"].as_str().unwrap_or_default());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            "content_block_stop" => {
+                let block = &mut self.message["content"][index];
+                if block["type"] == "tool_use" {
+                    let raw = self.partial.get(index).map(String::as_str).unwrap_or("");
+                    block["input"] = if raw.trim().is_empty() {
+                        json!({})
+                    } else {
+                        serde_json::from_str(raw).unwrap_or_else(|e| {
+                            json!({"invalid_json": format!("the tool input was not valid JSON: {e}")})
+                        })
+                    };
+                }
+            }
+            "message_delta" => {
+                if let Some(delta) = event["delta"].as_object() {
+                    for (k, v) in delta {
+                        self.message[k] = v.clone();
+                    }
+                }
+            }
+            "error" => {
+                let message = event["error"]["message"].as_str().unwrap_or("stream error");
+                return Err(HarnessError::Api(0, message.to_owned()));
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    pub fn finish(self) -> Value {
+        self.message
+    }
+}
+
+fn append(block: &mut Value, key: &str, piece: &Value) {
+    let mut text = block[key].as_str().unwrap_or_default().to_owned();
+    text.push_str(piece.as_str().unwrap_or_default());
+    block[key] = Value::String(text);
 }
 
 impl Claude {
@@ -153,19 +253,35 @@ impl Model for Claude {
         if SERVER_FALLBACK_MODELS.contains(&self.model.as_str()) {
             request = request.header("anthropic-beta", "server-side-fallback-2026-07-01");
         }
-        let response = request
+        let mut response = request
             .send()
             .await
             .map_err(|e| HarnessError::Network(e.to_string()))?;
         let status = response.status();
-        let body: Value = response
-            .json()
-            .await
-            .map_err(|e| HarnessError::Network(e.to_string()))?;
         if !status.is_success() {
+            let body: Value = response
+                .json()
+                .await
+                .map_err(|e| HarnessError::Network(e.to_string()))?;
             let message = body["error"]["message"].as_str().unwrap_or("no message");
             return Err(HarnessError::Api(status.as_u16(), message.to_owned()));
         }
-        parse_response(&body)
+        let mut stream = Stream::default();
+        let mut pending = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|e| HarnessError::Network(e.to_string()))?
+        {
+            pending.extend_from_slice(&chunk);
+            let valid = match std::str::from_utf8(&pending) {
+                Ok(_) => pending.len(),
+                Err(e) => e.valid_up_to(),
+            };
+            let text = String::from_utf8(pending.drain(..valid).collect())
+                .expect("the prefix was checked to be UTF-8");
+            stream.push(&text)?;
+        }
+        parse_response(&stream.finish())
     }
 }

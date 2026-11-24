@@ -2,8 +2,8 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use aether_harness::{
-    Bench, Event, HarnessError, Message, Model, ToolCall, ToolSpec, Turn, parse_response, realize,
-    request_body,
+    Bench, Event, HarnessError, Message, Model, Stream, ToolCall, ToolSpec, Turn, parse_response,
+    realize, request_body,
 };
 use aether_kernel::{Actor, BlobHash, Input, InputOutcome, Kernel, Law};
 use aether_world::{Owner, PlayerId, Value};
@@ -251,6 +251,9 @@ fn requests_follow_the_messages_api() {
         "Haiku has no server-side fallback"
     );
     assert_eq!(haiku["tools"][0]["strict"], true);
+    assert_eq!(haiku["stream"], true);
+    assert_eq!(haiku["max_tokens"], 64000);
+    assert_eq!(haiku["tools"][0]["eager_input_streaming"], true);
     assert_eq!(haiku["system"][0]["cache_control"]["type"], "ephemeral");
     assert_eq!(
         haiku["messages"][1]["content"][0]["type"], "thinking",
@@ -359,4 +362,43 @@ async fn trials_can_pull_the_trigger() {
     assert!(!r[0].is_error, "{report}");
     assert!(report.contains("received: hit x"), "{report}");
     assert!(report.contains("health="), "{report}");
+}
+
+#[test]
+fn streamed_turns_are_reassembled() {
+    let sse = concat!(
+        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"role\":\"assistant\",\"content\":[],\"stop_reason\":null}}\n\n",
+        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\n",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"plan\"}}\n\n",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig\"}}\n\n",
+        "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"Testing \"}}\n\n",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"it.\"}}\n\n",
+        "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"trial\",\"input\":{}}}\n\n",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"ticks\\\": \"}}\n\n",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"30}\"}}\n\n",
+        "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":2}\n\n",
+        "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":9}}\n\n",
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    );
+    let mut stream = Stream::default();
+    for piece in sse.as_bytes().chunks(7) {
+        stream.push(std::str::from_utf8(piece).unwrap()).unwrap();
+    }
+    let turn = parse_response(&stream.finish()).unwrap();
+    assert_eq!(turn.text, "Testing it.");
+    assert_eq!(turn.calls[0].name, "trial");
+    assert_eq!(turn.calls[0].input["ticks"], 30);
+    assert_eq!(turn.assistant["content"][0]["thinking"], "plan");
+    assert_eq!(turn.assistant["content"][0]["signature"], "sig");
+
+    let mut cut = Stream::default();
+    cut.push(&sse.replace("\"tool_use\"},\"usage", "\"max_tokens\"},\"usage"))
+        .unwrap();
+    assert!(matches!(
+        parse_response(&cut.finish()),
+        Err(HarnessError::Truncated)
+    ));
 }
