@@ -496,3 +496,69 @@ fn terrain_heights_are_pinned_bit_for_bit() {
         "pinned values: update only together with the viewer's copy of the terrain function"
     );
 }
+
+fn place_of(k: &Kernel, body: EntityId) -> (f64, f64) {
+    (num(k, body, "pos.x"), num(k, body, "pos.y"))
+}
+
+#[test]
+fn newcomers_appear_at_the_hub_and_return_to_their_home() {
+    let mut k = Kernel::new(Law::default(), 4);
+    let realm = install(&mut k, Actor::Admin, REALM, vec![]);
+    let hub = k.state().capsules[&realm].self_entity;
+    step(&mut k, vec![(player("ana"), signal(hub, "join", 0.0))]);
+    step(&mut k, vec![]);
+    let ana = avatar_of(&k, "ana");
+    let (x, y) = place_of(&k, ana);
+    assert!(x.hypot(y) <= 6.0, "newcomers spawn at the hub: {x}, {y}");
+    step(
+        &mut k,
+        vec![
+            (player("ana"), signal(ana, "mx", 1.0)),
+            (player("ana"), signal(ana, "run", 1.0)),
+        ],
+    );
+    for _ in 0..40 {
+        step(&mut k, vec![]);
+    }
+    step(&mut k, vec![(player("ana"), signal(ana, "mx", 0.0))]);
+    step(&mut k, vec![]);
+    let home = place_of(&k, ana);
+    assert!(home.0 > 20.0, "ana walked away from the hub: {home:?}");
+    step(&mut k, vec![(player("ana"), signal(ana, "home", 1.0))]);
+    step(&mut k, vec![(player("ana"), signal(ana, "leave", 1.0))]);
+    step(&mut k, vec![]);
+    assert!(roster(&k, realm).is_empty(), "ana left");
+    step(&mut k, vec![(player("ana"), signal(hub, "join", 0.0))]);
+    step(&mut k, vec![]);
+    let back = place_of(&k, avatar_of(&k, "ana"));
+    assert!(
+        (back.0 - home.0).hypot(back.1 - home.1) <= 1.5,
+        "a returning player appears at home {home:?}, got {back:?}"
+    );
+}
+
+#[test]
+fn players_can_visit_a_friend() {
+    let Duel {
+        mut k, ana, budi, ..
+    } = duel();
+    step(
+        &mut k,
+        vec![
+            (Actor::Admin, set(ana, "pos.x", 40.0)),
+            (Actor::Admin, set(ana, "pos.y", -30.0)),
+        ],
+    );
+    step(&mut k, vec![]);
+    step(
+        &mut k,
+        vec![(player("budi"), signal(budi, "visit", ana.0 as f64))],
+    );
+    step(&mut k, vec![]);
+    let (a, b) = (place_of(&k, ana), place_of(&k, budi));
+    assert!(
+        (a.0 - b.0).hypot(a.1 - b.1) < 2.0,
+        "budi stands next to ana: {a:?} {b:?}"
+    );
+}

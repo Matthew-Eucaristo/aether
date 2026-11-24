@@ -87,7 +87,7 @@
   </div>
   <div id="tip"></div>
   <div id="hud"><div id="cross"></div><div id="hudmsg"></div><div id="feed"></div>
-    <div id="hudbar"><span id="hudname"></span><div id="hp"><div id="hpfill"></div></div><span id="hudhp">100</span><span>weapon <b id="hudslot">1</b></span><span id="hudscore" class="dim"></span><span class="dim">WASD · space · click · 1-9 · esc</span></div>
+    <div id="hudbar"><span id="hudname"></span><div id="hp"><div id="hpfill"></div></div><span id="hudhp">100</span><span>weapon <b id="hudslot">1</b></span><span id="hudscore" class="dim"></span><span class="dim">WASD · space · click · 1-9 · H home · V visit · esc</span></div>
   </div>
   <canvas id="beat"></canvas>
 </main>
@@ -1869,6 +1869,17 @@ window.addEventListener("keydown", (e) => {
   if (!play.active || !play.locked) return;
   if (/^Digit[1-9]$/.test(e.code)) play.weapon = Number(e.code.slice(5));
   if (e.code === "Space" && !e.repeat && play.avatar !== null && play.grounded) { play.vz = 8; play.grounded = false; signal(play.avatar, "jump", 1); }
+  if (e.code === "KeyH" && !e.repeat && play.avatar !== null) { signal(play.avatar, "home", 1); event("home set here: you will come back to this spot", "ok"); }
+  if (e.code === "KeyV" && !e.repeat && play.avatar !== null && play.pos) {
+    let best = null, bd = Infinity;
+    for (const [id, other] of world.entities) {
+      if (id === play.avatar || !other.components.avatar) continue;
+      const d = Math.hypot(num(other, "pos.x") - play.pos[0], num(other, "pos.y") - play.pos[1]);
+      if (d < bd) { bd = d; best = id; }
+    }
+    if (best === null) event("nobody to visit in view", "bad");
+    else { signal(play.avatar, "visit", best); event(`visiting ${text(world.entities.get(best), "label") || best}`, "ok"); }
+  }
   play.keys.add(e.code);
   e.preventDefault();
 });
