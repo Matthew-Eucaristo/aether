@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use aether_kernel::{
     Action, Actor, Budget, Cap, Fault, Grant, Input, InputOutcome, Kernel, KernelError, Law, RULES,
-    State, Status, TickReport,
+    Sender, State, Status, TickReport,
 };
 use aether_world::{CapsuleId, EntityId, Owner, PlayerId, Usage, Value};
 
@@ -995,8 +995,8 @@ fn rules_fingerprint() {
     assert_eq!(
         (RULES, fingerprint.as_str()),
         (
-            "aether-rules/4",
-            "faa0f4d06879621cfaa6a518dc8ae47233e29e91bec269a8398442d98ae5be72"
+            "aether-rules/7",
+            "6fb2aa118e1c620c447bfc0acb8d847302ed134d18d559caa093c1a1a9798855"
         ),
         "the kernel's observable behaviour changed: if that is intended, bump RULES and update this fingerprint"
     );
@@ -1109,4 +1109,237 @@ fn helix_moves_eight_entities_through_three_dimensions() {
     for (a, b) in before.iter().zip(heights(&k)) {
         assert!((b - a - 0.03).abs() < 1e-9 || b < *a, "{a} -> {b}");
     }
+}
+
+#[test]
+fn black_hole_moves_fifty_thousand_particles_per_tick() {
+    let mut law = Law::default();
+    law.ceiling.fuel_per_tick = 8_000_000;
+    let mut k = Kernel::new(law.clone(), 7);
+    let wasm = k.add_blob(capsule!("blackhole").as_bytes().to_vec());
+    let report = k.step(vec![Input {
+        actor: Actor::Admin,
+        action: Action::Install {
+            wasm,
+            grants: vec![],
+            budget: law.ceiling,
+        },
+    }]);
+    let id = match report.inputs[0] {
+        InputOutcome::Installed(id) => id,
+        ref other => panic!("{other:?}"),
+    };
+    assert_eq!(fault_of(&report, id), None);
+    let disk = k
+        .world()
+        .entities()
+        .find(|(_, e)| e.components.contains_key("points"))
+        .map(|(id, _)| id)
+        .unwrap();
+    let points = |k: &Kernel| match k.world().entity(disk).unwrap().components.get("points") {
+        Some(Value::Nums(n)) => n.clone(),
+        other => panic!("{other:?}"),
+    };
+    let before = points(&k);
+    assert_eq!(before.len(), 150_000);
+    for report in run(&mut k, 10) {
+        assert_eq!(fault_of(&report, id), None);
+    }
+    let after = points(&k);
+    let mut moved = 0;
+    for (a, b) in before.chunks(3).zip(after.chunks(3)) {
+        let r = (b[0] * b[0] + b[1] * b[1]).sqrt();
+        assert!((1.0..9.5).contains(&r), "radius {r}");
+        if (a[0] - b[0]).abs() + (a[1] - b[1]).abs() > 1e-6 {
+            moved += 1;
+        }
+    }
+    assert_eq!(moved, 50_000);
+}
+
+#[test]
+fn the_region_fuel_budget_keeps_a_fair_share_for_every_capsule() {
+    let mut k = Kernel::new(
+        Law {
+            region_fuel_per_tick: 3_000_000,
+            max_consecutive_faults: 10,
+            ..Law::default()
+        },
+        1,
+    );
+    let greedy = install(&mut k, capsule!("greedy"), vec![]);
+    let dice = install(&mut k, capsule!("dice"), vec![]);
+    let bounce = install(&mut k, capsule!("bounce"), vec![]);
+    let report = k.step(Vec::new());
+    let fuel = |id| {
+        report
+            .runs
+            .iter()
+            .find(|r| r.capsule == id)
+            .unwrap()
+            .fuel_used
+    };
+    assert_eq!(fault_of(&report, greedy), Some(Fault::OutOfFuel));
+    assert!(
+        fuel(greedy) <= 1_000_000,
+        "greedy runs first yet must leave a floor of 1M for each of the other two, took {}",
+        fuel(greedy)
+    );
+    assert_eq!(fault_of(&report, dice), None);
+    assert_eq!(fault_of(&report, bounce), None);
+    let total: u64 = report.runs.iter().map(|r| r.fuel_used).sum();
+    assert!(total <= 3_000_000, "{total}");
+}
+
+const TOGGLE: &str = r#"(module
+  (import "world" "self" (func $self (result i64)))
+  (import "world" "kind" (func $kind (param i64 i32 i32) (result i32)))
+  (import "world" "get_bool" (func $get_bool (param i64 i32 i32) (result i32)))
+  (import "world" "set_bool" (func $set_bool (param i32 i32 i32 i32)))
+  (import "world" "signal_find" (func $find (param i32 i32 i64 i32) (result i32)))
+  (import "world" "signal_from" (func $from (param i32 i32 i32) (result i32)))
+  (import "world" "set_text" (func $set_text (param i32 i32 i32 i32 i32)))
+  (import "world" "emit" (func $emit (param i64 i32 i32 f64)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "on")
+  (data (i32.const 8) "use")
+  (data (i32.const 16) "toggled")
+  (data (i32.const 32) "by")
+  (func (export "tick") (local $i i32) (local $on i32) (local $n i32)
+    (local.set $i (i32.const -1))
+    (block $done
+      (loop $next
+        (local.set $i (call $find (i32.const 8) (i32.const 3) (call $self) (local.get $i)))
+        (br_if $done (i32.lt_s (local.get $i) (i32.const 0)))
+        (local.set $on (i32.eqz
+          (if (result i32) (call $kind (call $self) (i32.const 0) (i32.const 2))
+            (then (call $get_bool (call $self) (i32.const 0) (i32.const 2)))
+            (else (i32.const 0)))))
+        (call $set_bool (i32.const 0) (i32.const 0) (i32.const 2) (local.get $on))
+        (local.set $n (call $from (local.get $i) (i32.const 256) (i32.const 64)))
+        (call $set_text (i32.const 0) (i32.const 32) (i32.const 2) (i32.const 256) (local.get $n))
+        (call $emit (call $self) (i32.const 16) (i32.const 7) (f64.convert_i32_s (local.get $on)))
+        (br $next)))))"#;
+
+fn bool_of(k: &Kernel, e: EntityId, key: &str) -> Option<bool> {
+    match k.world().entity(e)?.components.get(key)? {
+        Value::Bool(b) => Some(*b),
+        _ => None,
+    }
+}
+
+#[test]
+fn players_signal_things_and_capsules_signal_each_other() {
+    let mut k = Kernel::new(Law::default(), 1);
+    let id = install(&mut k, TOGGLE, vec![]);
+    let me = self_entity(&k, id);
+    let press = |actor: Actor| Input {
+        actor,
+        action: Action::Signal {
+            entity: me,
+            name: "use".into(),
+            value: 1.0,
+        },
+    };
+    let report = k.step(vec![press(player("ana"))]);
+    assert_eq!(report.inputs[0], InputOutcome::Applied);
+    assert_eq!(
+        bool_of(&k, me, "on"),
+        Some(true),
+        "a player's signal arrives the same tick"
+    );
+    assert!(matches!(
+        k.world().entity(me).unwrap().components.get("by"),
+        Some(Value::Text(t)) if t == "player:ana"
+    ));
+    assert!(report.signals.iter().any(|s| s.name == "use"));
+
+    let next = k.step(Vec::new());
+    let echo = next
+        .signals
+        .iter()
+        .find(|s| s.name == "toggled")
+        .expect("the capsule's signal arrives the next tick");
+    assert_eq!(echo.from, Sender::Capsule(id));
+    assert_eq!(echo.value, 1.0);
+    assert_eq!(bool_of(&k, me, "on"), Some(true), "toggled is not use");
+
+    k.step(vec![press(Actor::Admin)]);
+    assert_eq!(bool_of(&k, me, "on"), Some(false));
+
+    let report = k.step(vec![Input {
+        actor: player("ana"),
+        action: Action::Signal {
+            entity: EntityId(9999),
+            name: "use".into(),
+            value: 1.0,
+        },
+    }]);
+    assert!(matches!(report.inputs[0], InputOutcome::Rejected(_)));
+}
+
+#[test]
+fn signals_from_a_faulted_tick_are_discarded() {
+    let mut k = Kernel::new(Law::default(), 1);
+    let src = r#"(module
+      (import "world" "self" (func $self (result i64)))
+      (import "world" "emit" (func $emit (param i64 i32 i32 f64)))
+      (memory (export "memory") 1)
+      (data (i32.const 0) "ping")
+      (func (export "tick")
+        (call $emit (call $self) (i32.const 0) (i32.const 4) (f64.const 1))
+        unreachable))"#;
+    install(&mut k, src, vec![]);
+    let report = k.step(Vec::new());
+    assert!(report.signals.is_empty(), "{:?}", report.signals);
+    assert!(k.state().signals.is_empty());
+}
+
+#[test]
+fn a_house_with_a_door_a_lamp_and_a_computer_reacts_to_people() {
+    let mut k = Kernel::new(Law::default(), 1);
+    let id = install(&mut k, capsule!("house"), vec![]);
+    let handle = |k: &Kernel, h: usize| k.state().capsules[&id].clist[h].unwrap().entity;
+    let (door, lamp, switch, screen) =
+        (handle(&k, 7), handle(&k, 8), handle(&k, 9), handle(&k, 11));
+    let use_it = |entity| Input {
+        actor: player("ana"),
+        action: Action::Signal {
+            entity,
+            name: "use".into(),
+            value: 1.0,
+        },
+    };
+    for report in run(&mut k, 2) {
+        assert_eq!(fault_of(&report, id), None);
+    }
+    k.step(vec![use_it(door), use_it(switch)]);
+    for report in run(&mut k, 15) {
+        assert_eq!(fault_of(&report, id), None);
+    }
+    let rot = num(&k, door, "rot.z").unwrap();
+    assert!((rot + 1.45).abs() < 1e-9, "door swung to {rot}");
+    assert_eq!(num(&k, lamp, "light"), Some(9.0));
+
+    let keys: Vec<Input> = "12*3+4"
+        .chars()
+        .map(|c| c as u32 as f64)
+        .chain([13.0])
+        .map(|code| Input {
+            actor: player("ana"),
+            action: Action::Signal {
+                entity: screen,
+                name: "key".into(),
+                value: code,
+            },
+        })
+        .collect();
+    let report = k.step(keys);
+    assert_eq!(fault_of(&report, id), None);
+    let label = match k.world().entity(screen).unwrap().components.get("label") {
+        Some(Value::Text(t)) => t.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert!(label.contains("= 40"), "{label}");
+    assert!(label.starts_with("AETHER-1\n> "), "{label}");
 }

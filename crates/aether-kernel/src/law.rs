@@ -12,6 +12,7 @@ pub struct Law {
     pub max_consecutive_faults: u32,
     pub allow_spawn: bool,
     pub max_inputs_per_actor: u32,
+    pub region_fuel_per_tick: u64,
     pub player_quota: Usage,
     pub ceiling: Budget,
 }
@@ -26,12 +27,13 @@ impl Default for Law {
             max_consecutive_faults: 3,
             allow_spawn: true,
             max_inputs_per_actor: 32,
+            region_fuel_per_tick: 50_000_000,
             player_quota: Usage {
                 entities: 500,
                 bytes: 512 << 10,
             },
             ceiling: Budget {
-                fuel_per_tick: 1_000_000,
+                fuel_per_tick: 10_000_000,
                 memory_bytes: 16 << 20,
                 writes_per_tick: 1024,
                 spawns_per_tick: 16,

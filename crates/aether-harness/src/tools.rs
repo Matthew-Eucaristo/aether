@@ -163,6 +163,16 @@ fn value(v: &Value) -> String {
         Value::Num(n) => format!("{}", (n * 1000.0).round() / 1000.0),
         Value::Text(t) => format!("{t:?}"),
         Value::Bool(b) => b.to_string(),
+        Value::Nums(n) => format!(
+            "[{} numbers: {}{}]",
+            n.len(),
+            n.iter()
+                .take(6)
+                .map(|x| format!("{}", (x * 1000.0).round() / 1000.0))
+                .collect::<Vec<_>>()
+                .join(", "),
+            if n.len() > 6 { ", …" } else { "" }
+        ),
     }
 }
 

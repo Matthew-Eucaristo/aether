@@ -7,6 +7,7 @@ use crate::blob::BlobHash;
 use crate::capsule::{Budget, Cap, Capsule, Status};
 use crate::input::Actor;
 use crate::law::Law;
+use crate::signal::{Sender, Signal};
 
 pub(crate) trait Canon {
     fn feed(&self, h: &mut Hasher);
@@ -69,6 +70,7 @@ impl Canon for Law {
             max_consecutive_faults,
             allow_spawn,
             max_inputs_per_actor,
+            region_fuel_per_tick,
             player_quota,
             ceiling,
         } = self;
@@ -79,6 +81,7 @@ impl Canon for Law {
         max_consecutive_faults.feed(h);
         allow_spawn.feed(h);
         max_inputs_per_actor.feed(h);
+        region_fuel_per_tick.feed(h);
         player_quota.feed(h);
         ceiling.feed(h);
     }
@@ -153,6 +156,34 @@ impl Canon for BTreeMap<CapsuleId, Capsule> {
         for (id, capsule) in self {
             id.0.feed(h);
             capsule.feed(h);
+        }
+    }
+}
+
+impl Canon for Vec<Signal> {
+    fn feed(&self, h: &mut Hasher) {
+        (self.len() as u64).feed(h);
+        for Signal {
+            from,
+            entity,
+            name,
+            value,
+        } in self
+        {
+            match from {
+                Sender::Actor(a) => {
+                    h.update(&[0]);
+                    a.feed(h);
+                }
+                Sender::Capsule(c) => {
+                    h.update(&[1]);
+                    c.0.feed(h);
+                }
+            }
+            entity.0.feed(h);
+            (name.len() as u64).feed(h);
+            h.update(name.as_bytes());
+            value.to_bits().feed(h);
         }
     }
 }

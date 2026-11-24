@@ -278,5 +278,16 @@ fn hash_value(h: &mut blake3::Hasher, value: &Value) {
         Value::Bool(b) => {
             h.update(&[2, u8::from(*b)]);
         }
+        Value::Nums(nums) => {
+            h.update(&[3]);
+            h.update(&(nums.len() as u64).to_le_bytes());
+            let mut buf = [0u8; 4096];
+            for chunk in nums.chunks(buf.len() / 8) {
+                for (slot, n) in buf.as_chunks_mut::<8>().0.iter_mut().zip(chunk) {
+                    slot.copy_from_slice(&n.to_bits().to_le_bytes());
+                }
+                h.update(&buf[..chunk.len() * 8]);
+            }
+        }
     }
 }

@@ -18,6 +18,7 @@ dependencies = [
  "aether-kernel",
  "aether-store",
  "aether-world",
+ "serde_json",
 ]
 
 [[package]]

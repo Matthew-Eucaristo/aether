@@ -1,10 +1,12 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 pub const MAX_KEY_LEN: usize = 64;
 pub const MAX_TEXT_LEN: usize = 4096;
 pub const MAX_COMPONENTS: usize = 128;
+pub const MAX_NUMS: usize = 1 << 20;
 pub const ENTITY_OVERHEAD_BYTES: u64 = 64;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -18,6 +20,7 @@ pub fn value_bytes(value: &Value) -> u64 {
         Value::Num(_) => 8,
         Value::Text(t) => t.len() as u64,
         Value::Bool(_) => 1,
+        Value::Nums(n) => 8 * n.len() as u64,
     }
 }
 
@@ -56,6 +59,7 @@ pub enum Value {
     Num(f64),
     Text(String),
     Bool(bool),
+    Nums(Arc<[f64]>),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -74,6 +78,8 @@ pub enum WorldError {
     NonFinite,
     #[error("text is longer than {MAX_TEXT_LEN} bytes")]
     TextTooLong,
+    #[error("a number array holds at most {MAX_NUMS} numbers")]
+    TooManyNums,
     #[error("an entity holds at most {MAX_COMPONENTS} components")]
     TooManyComponents,
     #[error("entity ids must be below next_entity")]
@@ -99,6 +105,8 @@ pub fn validate_value(value: &Value) -> Result<(), WorldError> {
     match value {
         Value::Num(n) if !n.is_finite() => Err(WorldError::NonFinite),
         Value::Text(t) if t.len() > MAX_TEXT_LEN => Err(WorldError::TextTooLong),
+        Value::Nums(n) if n.len() > MAX_NUMS => Err(WorldError::TooManyNums),
+        Value::Nums(n) if n.iter().any(|x| !x.is_finite()) => Err(WorldError::NonFinite),
         _ => Ok(()),
     }
 }

@@ -1,9 +1,13 @@
+use std::sync::Arc;
+
 use aether_world::{
-    CapsuleId, Entity, EntityId, MAX_KEY_LEN, MAX_TEXT_LEN, Owner, Txn, Value, World, WorldError,
+    CapsuleId, Entity, EntityId, MAX_KEY_LEN, MAX_NUMS, MAX_TEXT_LEN, Owner, Txn, Value, World,
+    WorldError,
 };
 use wasmtime::{Caller, Engine, Error, Linker, StoreLimits, Trap};
 
 use crate::capsule::Cap;
+use crate::signal::{Sender, Signal};
 
 const COST_READ: u64 = 20;
 const COST_WRITE: u64 = 50;
@@ -23,6 +27,8 @@ pub(crate) struct HostState {
     pub rng: u64,
     pub log: Vec<String>,
     pub log_bytes_left: usize,
+    pub signals: Arc<[Signal]>,
+    pub emitted: Vec<Signal>,
     pub limits: StoreLimits,
 }
 
@@ -46,6 +52,8 @@ pub enum HostError {
     RegionFull,
     #[error("the capability list is full")]
     ClistFull,
+    #[error("there is no signal {0} this tick")]
+    BadSignal(i32),
     #[error("guest memory access out of bounds")]
     BadMemory,
     #[error("guest string is not valid UTF-8")]
@@ -79,12 +87,12 @@ fn charge(caller: &mut Caller<'_, HostState>, cost: u64) -> wasmtime::Result<()>
     }
 }
 
-fn read_str(
+fn read_raw(
     caller: &mut Caller<'_, HostState>,
     ptr: i32,
     len: i32,
     max: usize,
-) -> Result<String, HostError> {
+) -> Result<Vec<u8>, HostError> {
     let len = usize::try_from(len).map_err(|_| HostError::BadMemory)?;
     if len > max {
         return Err(HostError::TooLong);
@@ -95,12 +103,20 @@ fn read_str(
         .get_export("memory")
         .and_then(|e| e.into_memory())
         .ok_or(HostError::BadMemory)?;
-    let bytes = memory
+    Ok(memory
         .data(&*caller)
         .get(ptr..end)
         .ok_or(HostError::BadMemory)?
-        .to_vec();
-    String::from_utf8(bytes).map_err(|_| HostError::BadUtf8)
+        .to_vec())
+}
+
+fn read_str(
+    caller: &mut Caller<'_, HostState>,
+    ptr: i32,
+    len: i32,
+    max: usize,
+) -> Result<String, HostError> {
+    String::from_utf8(read_raw(caller, ptr, len, max)?).map_err(|_| HostError::BadUtf8)
 }
 
 fn id_to_i64(id: EntityId) -> i64 {
@@ -140,6 +156,13 @@ fn write_out(
     Ok(len)
 }
 
+fn signal(state: &HostState, i: i32) -> Result<&Signal, HostError> {
+    usize::try_from(i)
+        .ok()
+        .and_then(|i| state.signals.get(i))
+        .ok_or(HostError::BadSignal(i))
+}
+
 fn cap(state: &HostState, handle: i32) -> Result<Cap, HostError> {
     usize::try_from(handle)
         .ok()
@@ -167,6 +190,109 @@ fn set_value(state: &mut HostState, handle: i32, key: &str, value: Value) -> Res
 
 pub(crate) fn linker(engine: &Engine) -> wasmtime::Result<Linker<HostState>> {
     let mut l = Linker::new(engine);
+
+    l.func_wrap(
+        "world",
+        "signal_find",
+        |mut c: Caller<'_, HostState>,
+         kp: i32,
+         kl: i32,
+         entity: i64,
+         after: i32|
+         -> wasmtime::Result<i32> {
+            charge(&mut c, COST_READ)?;
+            let name = deny(read_str(&mut c, kp, kl, MAX_KEY_LEN))?;
+            let start = usize::try_from(after.saturating_add(1)).unwrap_or(0);
+            let found = c
+                .data()
+                .signals
+                .iter()
+                .enumerate()
+                .skip(start)
+                .find(|(_, sig)| {
+                    (name.is_empty() || sig.name == name)
+                        && (entity < 0 || i64::try_from(sig.entity.0).ok() == Some(entity))
+                })
+                .map(|(i, _)| i);
+            let total = c.data().signals.len();
+            charge(
+                &mut c,
+                (found.map_or(total, |i| i + 1).saturating_sub(start)) as u64,
+            )?;
+            Ok(found.map_or(-1, |i| i32::try_from(i).unwrap_or(i32::MAX)))
+        },
+    )?;
+
+    l.func_wrap(
+        "world",
+        "signal_entity",
+        |mut c: Caller<'_, HostState>, i: i32| -> wasmtime::Result<i64> {
+            charge(&mut c, COST_READ)?;
+            Ok(id_to_i64(deny(signal(c.data(), i))?.entity))
+        },
+    )?;
+
+    l.func_wrap(
+        "world",
+        "signal_value",
+        |mut c: Caller<'_, HostState>, i: i32| -> wasmtime::Result<f64> {
+            charge(&mut c, COST_READ)?;
+            Ok(deny(signal(c.data(), i))?.value)
+        },
+    )?;
+
+    l.func_wrap(
+        "world",
+        "signal_name",
+        |mut c: Caller<'_, HostState>, i: i32, bp: i32, bl: i32| -> wasmtime::Result<i32> {
+            charge(&mut c, COST_READ)?;
+            let name = deny(signal(c.data(), i))?.name.clone();
+            deny(write_out(&mut c, bp, bl, name.as_bytes()))
+        },
+    )?;
+
+    l.func_wrap(
+        "world",
+        "signal_from",
+        |mut c: Caller<'_, HostState>, i: i32, bp: i32, bl: i32| -> wasmtime::Result<i32> {
+            charge(&mut c, COST_READ)?;
+            let from = deny(signal(c.data(), i))?.from.label();
+            deny(write_out(&mut c, bp, bl, from.as_bytes()))
+        },
+    )?;
+
+    l.func_wrap(
+        "world",
+        "emit",
+        |mut c: Caller<'_, HostState>,
+         entity: i64,
+         kp: i32,
+         kl: i32,
+         value: f64|
+         -> wasmtime::Result<()> {
+            charge(&mut c, COST_WRITE)?;
+            let name = deny(read_str(&mut c, kp, kl, MAX_KEY_LEN))?;
+            deny(aether_world::validate_key(&name).map_err(HostError::from))?;
+            if !value.is_finite() {
+                return deny(Err(HostError::World(WorldError::NonFinite)));
+            }
+            let s = c.data_mut();
+            if lookup(s, entity).is_none() {
+                return deny(Err(HostError::World(WorldError::NoSuchEntity(EntityId(
+                    u64::try_from(entity).unwrap_or(u64::MAX),
+                )))));
+            }
+            s.writes_left = deny(s.writes_left.checked_sub(1).ok_or(HostError::WriteBudget))?;
+            let from = Sender::Capsule(s.capsule);
+            s.emitted.push(Signal {
+                from,
+                entity: EntityId(u64::try_from(entity).expect("lookup accepted the id")),
+                name,
+                value,
+            });
+            Ok(())
+        },
+    )?;
 
     l.func_wrap("world", "self", |c: Caller<'_, HostState>| -> i64 {
         c.data().clist[0].map_or(-1, |cap| id_to_i64(cap.entity))
@@ -200,6 +326,7 @@ pub(crate) fn linker(engine: &Engine) -> wasmtime::Result<Linker<HostState>> {
                 Some(Value::Num(_)) => 1,
                 Some(Value::Text(_)) => 2,
                 Some(Value::Bool(_)) => 3,
+                Some(Value::Nums(_)) => 4,
             })
         },
     )?;
@@ -227,6 +354,33 @@ pub(crate) fn linker(engine: &Engine) -> wasmtime::Result<Linker<HostState>> {
                 Some(Value::Bool(b)) => Ok(i32::from(*b)),
                 _ => deny(Err(HostError::WrongKind(key, "bool"))),
             }
+        },
+    )?;
+
+    l.func_wrap(
+        "world",
+        "get_nums",
+        |mut c: Caller<'_, HostState>,
+         id: i64,
+         kp: i32,
+         kl: i32,
+         dst: i32,
+         max: i32|
+         -> wasmtime::Result<i32> {
+            charge(&mut c, COST_READ)?;
+            let key = deny(read_str(&mut c, kp, kl, MAX_KEY_LEN))?;
+            let nums = match component(c.data(), id, &key) {
+                Some(Value::Nums(n)) => n.clone(),
+                _ => return deny(Err(HostError::WrongKind(key, "number array"))),
+            };
+            charge(&mut c, nums.len() as u64)?;
+            let count = i32::try_from(nums.len()).map_err(|_| Error::new(HostError::TooLong))?;
+            if count > max {
+                return Ok(count);
+            }
+            let bytes: Vec<u8> = nums.iter().flat_map(|n| n.to_le_bytes()).collect();
+            deny(write_out(&mut c, dst, max.saturating_mul(8), &bytes))?;
+            Ok(count)
         },
     )?;
 
@@ -306,6 +460,33 @@ pub(crate) fn linker(engine: &Engine) -> wasmtime::Result<Linker<HostState>> {
             let key = deny(read_str(&mut c, kp, kl, MAX_KEY_LEN))?;
             let text = deny(read_str(&mut c, vp, vl, MAX_TEXT_LEN))?;
             deny(set_value(c.data_mut(), h, &key, Value::Text(text)))
+        },
+    )?;
+
+    l.func_wrap(
+        "world",
+        "set_nums",
+        |mut c: Caller<'_, HostState>,
+         h: i32,
+         kp: i32,
+         kl: i32,
+         src: i32,
+         count: i32|
+         -> wasmtime::Result<()> {
+            charge(
+                &mut c,
+                COST_WRITE + u64::try_from(count.max(0)).unwrap_or(0),
+            )?;
+            let key = deny(read_str(&mut c, kp, kl, MAX_KEY_LEN))?;
+            let len = count.checked_mul(8).ok_or(Error::new(HostError::TooLong))?;
+            let bytes = deny(read_raw(&mut c, src, len, MAX_NUMS * 8))?;
+            let nums: Arc<[f64]> = bytes
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|b| f64::from_le_bytes(*b))
+                .collect();
+            deny(set_value(c.data_mut(), h, &key, Value::Nums(nums)))
         },
     )?;
 

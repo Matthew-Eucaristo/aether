@@ -7,8 +7,9 @@ use std::time::{Duration, Instant};
 use aether_harness::{Bench, Claude, Event, HarnessError, realize};
 use aether_kernel::{Action, Actor, BlobHash, Input, InputOutcome, Kernel, Law};
 use aether_store::Store;
-use aether_world::{Entity, EntityId, PlayerId};
+use aether_world::{Entity, EntityId, PlayerId, Value};
 use axum::Router;
+use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -22,7 +23,9 @@ const CHECKPOINT_EVERY: u64 = 600;
 const MAX_MESSAGE_BYTES: usize = 2 << 20;
 const QUEUE: usize = 4096;
 const INDEX: &str = include_str!("../web/index.html");
-const EXAMPLES: [(&str, &str); 10] = [
+const EXAMPLES: [(&str, &str); 12] = [
+    ("house", include_str!("../../../capsules/house.wat")),
+    ("blackhole", include_str!("../../../capsules/blackhole.wat")),
     ("helix", include_str!("../../../capsules/helix.wat")),
     ("orbit", include_str!("../../../capsules/orbit.wat")),
     ("bounce", include_str!("../../../capsules/bounce.wat")),
@@ -35,7 +38,50 @@ const EXAMPLES: [(&str, &str); 10] = [
     ("rollback", include_str!("../../../capsules/rollback.wat")),
 ];
 
-type Update = Arc<str>;
+struct Frame {
+    text: String,
+    halfs: Option<Bytes>,
+}
+
+type Update = Arc<Frame>;
+
+fn half(x: f32) -> u16 {
+    let bits = x.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exp = ((bits >> 23) & 0xff) as i32 - 127 + 15;
+    let mant = bits & 0x7f_ffff;
+    if exp >= 31 {
+        return sign | 0x7bff;
+    }
+    if exp <= 0 {
+        if exp < -10 {
+            return sign;
+        }
+        let m = (mant | 0x80_0000) >> (1 - exp);
+        return sign | ((m + 0x1000) >> 13) as u16;
+    }
+    let rounded = (((exp as u32) << 10) | (mant >> 13)) + ((mant >> 12) & 1);
+    sign | rounded.min(0x7bff) as u16
+}
+
+fn wire_entity(e: &Entity, halfs: &mut Vec<u16>) -> serde_json::Value {
+    let components: serde_json::Map<String, serde_json::Value> = e
+        .components
+        .iter()
+        .map(|(k, v)| {
+            let encoded = match v {
+                Value::Nums(n) => {
+                    let at = halfs.len();
+                    halfs.extend(n.iter().map(|x| half(*x as f32)));
+                    serde_json::json!({ "halfs": [at, n.len()] })
+                }
+                other => serde_json::to_value(other).expect("values serialize"),
+            };
+            (k.clone(), encoded)
+        })
+        .collect();
+    serde_json::json!({ "owner": e.owner, "components": components })
+}
 
 enum Request {
     Join {
@@ -68,7 +114,8 @@ enum ServerMsg<'a> {
     Tick {
         report: &'a aether_kernel::TickReport,
         inputs: &'a [Input],
-        changed: BTreeMap<EntityId, Option<&'a Entity>>,
+        changed: BTreeMap<EntityId, Option<serde_json::Value>>,
+        halfs: usize,
         capsules: &'a BTreeMap<aether_world::CapsuleId, aether_kernel::Capsule>,
         law: &'a Law,
     },
@@ -229,20 +276,35 @@ fn world_loop(
             let _ = reply.send(report.inputs[index].clone());
         }
         let k = store.kernel();
+        let mut halfs = Vec::new();
         let changed = report
             .touched
             .iter()
-            .map(|id| (*id, k.world().entity(*id)))
+            .map(|id| {
+                (
+                    *id,
+                    k.world().entity(*id).map(|e| wire_entity(e, &mut halfs)),
+                )
+            })
             .collect();
-        let msg = serde_json::to_string(&ServerMsg::Tick {
+        let text = serde_json::to_string(&ServerMsg::Tick {
             report: &report,
             inputs: &inputs,
             changed,
+            halfs: halfs.len(),
             capsules: &k.state().capsules,
             law: &k.state().law,
         })
         .expect("tick serializes");
-        let _ = updates.send(msg.into());
+        let halfs = (!halfs.is_empty()).then(|| {
+            Bytes::from(
+                halfs
+                    .iter()
+                    .flat_map(|h| h.to_le_bytes())
+                    .collect::<Vec<u8>>(),
+            )
+        });
+        let _ = updates.send(Arc::new(Frame { text, halfs }));
         if report.tick % CHECKPOINT_EVERY == 0
             && let Err(e) = store.checkpoint()
         {
@@ -409,7 +471,12 @@ async fn session(mut socket: WebSocket, actor: Actor, app: App) {
             }
             update = updates.recv() => {
                 let Ok(update) = update else { return };
-                if socket.send(Message::text(update.to_string())).await.is_err() {
+                if socket.send(Message::text(update.text.clone())).await.is_err() {
+                    return;
+                }
+                if let Some(halfs) = &update.halfs
+                    && socket.send(Message::Binary(halfs.clone())).await.is_err()
+                {
                     return;
                 }
             }
@@ -477,4 +544,22 @@ async fn main() {
     println!("admin:  http://127.0.0.1:{port}/?token={token}");
     println!("player: http://127.0.0.1:{port}/?player=ana");
     axum::serve(listener, router).await.expect("server runs");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::half;
+
+    #[test]
+    fn half_floats_round_to_nearest_and_saturate() {
+        assert_eq!(half(0.0), 0x0000);
+        assert_eq!(half(-0.0), 0x8000);
+        assert_eq!(half(1.0), 0x3c00);
+        assert_eq!(half(-2.5), 0xc100);
+        assert_eq!(half(0.1), 0x2e66);
+        assert_eq!(half(65504.0), 0x7bff);
+        assert_eq!(half(1.0e9), 0x7bff);
+        assert_eq!(half(6.0e-8), 0x0001);
+        assert_eq!(half(1.0e-12), 0x0000);
+    }
 }

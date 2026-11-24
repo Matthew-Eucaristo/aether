@@ -7,6 +7,7 @@ use aether_store::Store;
 use aether_world::Value;
 
 const BOUNCE: &str = include_str!("../../../capsules/bounce.wat");
+const BLACKHOLE: &str = include_str!("../../../capsules/blackhole.wat");
 const SCAN: &str = r#"(module
   (import "world" "find" (func $find (param i32 i32 i64) (result i64)))
   (import "world" "get_num" (func $get (param i64 i32 i32) (result f64)))
@@ -132,6 +133,41 @@ fn main() {
             &format!("one capsule summing hp over {entities}"),
             d,
             format!("{fuel} fuel"),
+        );
+    }
+
+    {
+        let mut law = law();
+        law.ceiling.fuel_per_tick = 8_000_000;
+        let mut k = Kernel::new(law.clone(), 1);
+        let wasm = k.add_blob(BLACKHOLE.as_bytes().to_vec());
+        k.step(vec![Input {
+            actor: Actor::Admin,
+            action: Action::Install {
+                wasm,
+                grants: Vec::new(),
+                budget: law.ceiling,
+            },
+        }]);
+        let mut fuel = 0;
+        let mut json = 0;
+        let d = per_tick(
+            || {
+                let r = k.step(Vec::new());
+                assert!(r.runs[0].fault.is_none(), "{:?}", r.runs[0].fault);
+                fuel = r.runs[0].fuel_used;
+                json = r
+                    .touched
+                    .iter()
+                    .map(|id| serde_json::to_vec(&k.world().entity(*id)).map_or(0, |v| v.len()))
+                    .sum();
+            },
+            20,
+        );
+        row(
+            "black hole, 50000 particles",
+            d,
+            format!("{fuel} fuel, {} KiB of JSON changes", json / 1024),
         );
     }
 

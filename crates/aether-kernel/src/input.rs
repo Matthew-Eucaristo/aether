@@ -70,6 +70,11 @@ pub enum Action {
     Resume {
         capsule: CapsuleId,
     },
+    Signal {
+        entity: EntityId,
+        name: String,
+        value: f64,
+    },
     SetLaw {
         law: Law,
     },

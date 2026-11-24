@@ -13,9 +13,10 @@ use crate::input::{Action, Actor, Input, InputOutcome};
 use crate::law::Law;
 use crate::meter::{DEPTH_EXPORT, DEPTH_LIMIT};
 use crate::runtime::{Runtime, THREAD_STACK};
+use crate::signal::{Sender, Signal};
 
 const LOG_BYTES_PER_TICK: usize = 1024;
-pub const RULES: &str = "aether-rules/4";
+pub const RULES: &str = "aether-rules/7";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct State {
@@ -24,6 +25,7 @@ pub struct State {
     pub seed: u64,
     pub next_capsule: u64,
     pub capsules: BTreeMap<CapsuleId, Capsule>,
+    pub signals: Vec<Signal>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -66,6 +68,7 @@ pub struct TickReport {
     pub inputs: Vec<InputOutcome>,
     pub runs: Vec<CapsuleRun>,
     pub touched: BTreeSet<EntityId>,
+    pub signals: Vec<Signal>,
     pub state_hash: BlobHash,
 }
 
@@ -74,6 +77,7 @@ pub struct Kernel {
     blobs: Blobs,
     runtime: Runtime,
     journal: Journal,
+    delivering: Vec<Signal>,
 }
 
 impl Kernel {
@@ -84,6 +88,7 @@ impl Kernel {
             seed,
             next_capsule: 0,
             capsules: BTreeMap::new(),
+            signals: Vec::new(),
         };
         Self::from_state(state, Blobs::new()).expect("an empty state is valid")
     }
@@ -107,6 +112,7 @@ impl Kernel {
             blobs,
             runtime,
             journal,
+            delivering: Vec::new(),
         })
     }
 
@@ -164,6 +170,7 @@ impl Kernel {
             seed,
             next_capsule,
             capsules,
+            signals,
         } = &self.state;
         let mut h = blake3::Hasher::new();
         h.update(b"aether-kernel/v2");
@@ -172,12 +179,14 @@ impl Kernel {
         seed.feed(&mut h);
         next_capsule.feed(&mut h);
         capsules.feed(&mut h);
+        signals.feed(&mut h);
         BlobHash(*h.finalize().as_bytes())
     }
 
     pub fn step(&mut self, inputs: Vec<Input>) -> TickReport {
         let tick = self.state.world.advance_tick();
         let mut touched = BTreeSet::new();
+        self.delivering = std::mem::take(&mut self.state.signals);
         let mut sent: BTreeMap<&Actor, u32> = BTreeMap::new();
         let outcomes = inputs
             .iter()
@@ -201,14 +210,25 @@ impl Kernel {
             .filter(|(_, c)| c.status == Status::Active)
             .map(|(id, _)| *id)
             .collect();
+        let signals: Arc<[Signal]> = std::mem::take(&mut self.delivering).into();
         let runs = std::thread::scope(|s| {
             std::thread::Builder::new()
                 .name("aether-capsules".into())
                 .stack_size(THREAD_STACK)
                 .spawn_scoped(s, || {
+                    let mut remaining = self.state.law.region_fuel_per_tick;
+                    let floor = remaining / active.len().max(1) as u64;
+                    let count = active.len() as u64;
                     active
                         .into_iter()
-                        .map(|id| self.run_capsule(id, &mut touched))
+                        .enumerate()
+                        .map(|(i, id)| {
+                            let reserve = floor * (count - 1 - i as u64);
+                            let cap = remaining.saturating_sub(reserve);
+                            let run = self.run_capsule(id, cap, &signals, &mut touched);
+                            remaining = remaining.saturating_sub(run.fuel_used);
+                            run
+                        })
                         .collect()
                 })
                 .expect("the OS provides a capsule thread")
@@ -221,6 +241,7 @@ impl Kernel {
             inputs: outcomes,
             runs,
             touched,
+            signals: signals.to_vec(),
             state_hash: self.state_hash(),
         }
     }
@@ -520,6 +541,26 @@ impl Kernel {
                     _ => Err(format!("capsule {} holds no handle {handle}", capsule.0)),
                 }
             }
+            Action::Signal {
+                entity,
+                name,
+                value,
+            } => {
+                aether_world::validate_key(name).map_err(|e| e.to_string())?;
+                if !value.is_finite() {
+                    return Err("signal values must be finite".into());
+                }
+                if world.entity(*entity).is_none() {
+                    return Err(format!("entity {} does not exist", entity.0));
+                }
+                self.delivering.push(Signal {
+                    from: Sender::Actor(actor.clone()),
+                    entity: *entity,
+                    name: name.clone(),
+                    value: *value,
+                });
+                Ok(InputOutcome::Applied)
+            }
             Action::Resume { capsule } => {
                 self.authorize_capsule(actor, *capsule)?;
                 let c = self
@@ -541,10 +582,17 @@ impl Kernel {
         }
     }
 
-    fn run_capsule(&mut self, id: CapsuleId, touched: &mut BTreeSet<EntityId>) -> CapsuleRun {
+    fn run_capsule(
+        &mut self,
+        id: CapsuleId,
+        region_cap: u64,
+        signals: &Arc<[Signal]>,
+        touched: &mut BTreeSet<EntityId>,
+    ) -> CapsuleRun {
         let law = self.state.law.clone();
         let capsule = self.state.capsules[&id].clone();
-        let budget = law.attenuate(&capsule.budget);
+        let mut budget = law.attenuate(&capsule.budget);
+        budget.fuel_per_tick = budget.fuel_per_tick.min(region_cap);
         let prepared = self
             .runtime
             .prepare(&self.blobs, &capsule.wasm)
@@ -570,6 +618,8 @@ impl Kernel {
             rng,
             log: Vec::new(),
             log_bytes_left: LOG_BYTES_PER_TICK,
+            signals: signals.clone(),
+            emitted: Vec::new(),
             limits: StoreLimitsBuilder::new()
                 .memory_size(usize::try_from(budget.memory_bytes).unwrap_or(usize::MAX))
                 .instances(1)
@@ -623,6 +673,7 @@ impl Kernel {
             Ok(()) => {
                 record.clist = host.clist;
                 record.consecutive_faults = 0;
+                self.state.signals.extend(host.emitted);
                 touched.extend(
                     self.state
                         .world

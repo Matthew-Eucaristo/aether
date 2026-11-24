@@ -96,6 +96,7 @@ fn law(rng: &mut Rng) -> Law {
         max_consecutive_faults: *rng.pick(&[1, 3, 50]),
         allow_spawn: rng.chance(70),
         max_inputs_per_actor: *rng.pick(&[1, 2, 32]),
+        region_fuel_per_tick: *rng.pick(&[1_000, 300_000, 50_000_000]),
         player_quota: Usage {
             entities: *rng.pick(&[1, 4, 500]),
             bytes: *rng.pick(&[100, 2_000, 512 << 10]),
@@ -106,7 +107,7 @@ fn law(rng: &mut Rng) -> Law {
 
 fn input(rng: &mut Rng, k: &Kernel, wasm: &[BlobHash]) -> Input {
     let capsule = CapsuleId(rng.below(k.state().next_capsule + 2));
-    match rng.below(12) {
+    match rng.below(13) {
         0 | 1 => Input {
             actor: actor(rng),
             action: Action::Spawn {
@@ -177,6 +178,14 @@ fn input(rng: &mut Rng, k: &Kernel, wasm: &[BlobHash]) -> Input {
                     entity: entity(rng, k),
                     write: rng.chance(50),
                 },
+            },
+        },
+        12 => Input {
+            actor: actor(rng),
+            action: Action::Signal {
+                entity: entity(rng, k),
+                name: (*rng.pick(&KEYS)).to_owned(),
+                value: *rng.pick(&[0.0, 1.0, f64::NAN]),
             },
         },
         11 => Input {

@@ -8,3 +8,4 @@ version.workspace = true
 aether-kernel = { version = "0.1.0", path = "../aether-kernel" }
 aether-store = { version = "0.1.0", path = "../aether-store" }
 aether-world = { version = "0.1.0", path = "../aether-world" }
+serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
