@@ -19,6 +19,16 @@
   #labels { position:absolute; inset:0; pointer-events:none; overflow:hidden; }
   #labels div { position:absolute; transform:translate(-50%, -100%); background:rgba(8,12,20,.82); color:#cfe3ff; border:1px solid #2b3a55; border-radius:4px; padding:3px 7px; font-size:11px; white-space:pre; max-width:320px; }
   #view:focus { outline:none; }
+  #hud { position:absolute; inset:0; pointer-events:none; display:none; }
+  #hud.on { display:block; }
+  #cross { position:absolute; left:50%; top:50%; width:18px; height:18px; margin:-9px 0 0 -9px; }
+  #cross:before, #cross:after { content:""; position:absolute; background:rgba(255,255,255,.85); box-shadow:0 0 3px #000; }
+  #cross:before { left:8px; top:0; width:2px; height:18px; }
+  #cross:after { top:8px; left:0; height:2px; width:18px; }
+  #hudbar { position:absolute; left:50%; bottom:22px; transform:translateX(-50%); background:rgba(11,13,18,.8); border:1px solid var(--line); border-radius:8px; padding:8px 14px; font-size:13px; display:flex; gap:16px; align-items:center; }
+  #hp { width:160px; height:10px; background:#2a2f3a; border-radius:5px; overflow:hidden; }
+  #hpfill { height:100%; width:100%; background:#4ade80; transition:width .15s; }
+  #hudmsg { position:absolute; left:50%; top:38%; transform:translateX(-50%); font-size:22px; color:#fca5a5; text-shadow:0 0 8px #000; }
   #tip { position:absolute; pointer-events:none; background:rgba(20,24,33,.95); border:1px solid var(--line); border-radius:4px; padding:4px 8px; font-size:11px; display:none; white-space:pre; }
   aside { overflow-y:auto; border-left:1px solid var(--line); background:var(--panel); }
   section { border-bottom:1px solid var(--line); padding:10px 12px; }
@@ -58,6 +68,7 @@
   <span title="state hash after the last tick">hash <b id="hash">…</b></span>
   <span id="fps" class="dim"></span>
   <button id="sound" title="Spatial sound from entities with sound.freq">sound off</button>
+  <button id="play" title="Walk around with an avatar: WASD, mouse to aim, click to fire, 1-9 weapons, Esc to release">play</button>
   <button id="gitoggle" title="Screen-space global illumination and ambient occlusion">GI on</button>
   <span id="status" class="off">connecting</span>
 </header>
@@ -72,6 +83,9 @@
     <div>drag: orbit · shift-drag: pan · wheel: zoom · click: inspect</div>
   </div>
   <div id="tip"></div>
+  <div id="hud"><div id="cross"></div><div id="hudmsg"></div>
+    <div id="hudbar"><span id="hudname"></span><div id="hp"><div id="hpfill"></div></div><span id="hudhp">100</span><span>weapon <b id="hudslot">1</b></span><span id="hudscore" class="dim"></span><span class="dim">WASD · space · click · 1-9 · esc</span></div>
+  </div>
   <canvas id="beat"></canvas>
 </main>
 <aside>
@@ -681,6 +695,13 @@ function capsuleNode(id, ids) {
   return [Math.cos(a) * RING, RING_Y + 0.4 * Math.sin(a * 3), Math.sin(a) * RING];
 }
 
+function orient(e, shape) {
+  const dx = num(e, "dir.x"), dy = num(e, "dir.y"), dz = num(e, "dir.z");
+  if (dx === undefined && dy === undefined && dz === undefined) return [num(e, "rot.x") ?? 0, num(e, "rot.y") ?? 0, num(e, "rot.z") ?? 0];
+  const x = dx ?? 0, y = dy ?? 0, z = dz ?? 0, h = Math.hypot(x, y), l = Math.hypot(h, z) || 1;
+  const yaw = h > 1e-9 ? Math.atan2(y, x) : 0;
+  return shape === "cylinder" ? [0, Math.atan2(h, z), yaw] : [0, -Math.asin(Math.max(-1, Math.min(1, z / l))), yaw];
+}
 function frameScene(now) {
   for (const k of ["sphere", "box", "cylinder"]) SHAPES[k].n = 0;
   pushInstance(SHAPES.box, [cam.target[0], -cam.target[2], -0.03], [160, 160, 0.05], [0, 0, 0], [0.11, 0.125, 0.15], 0);
@@ -688,13 +709,13 @@ function frameScene(now) {
   for (const [id, m] of motion) {
     const e = world.entities.get(id);
     if (!e) continue;
-    const p = lerp3(m.prev, m.cur, Math.min(1, (now - m.t0) / TICK_MS));
+    const p = play.active && id === play.avatar && play.pos ? play.pos : lerp3(m.prev, m.cur, Math.min(1, (now - m.t0) / TICK_MS));
     const shape = SHAPES[text(e, "shape")] ? text(e, "shape") : "sphere";
     const size = num(e, "size") ?? 0.28;
     const scl = shape === "sphere"
       ? [num(e, "scale.x") ?? size, num(e, "scale.y") ?? size, num(e, "scale.z") ?? size]
       : [num(e, "scale.x") ?? size * 2, num(e, "scale.y") ?? size * 2, num(e, "scale.z") ?? size * 2];
-    const rot = [num(e, "rot.x") ?? 0, num(e, "rot.y") ?? 0, num(e, "rot.z") ?? 0];
+    const rot = orient(e, shape);
     const color = entityColor(id, e);
     const glow = num(e, "glow") ?? 0;
     if (!swarms.has(id) || shape !== "sphere" || text(e, "look") === "blackhole") pushInstance(SHAPES[shape], p, scl, rot, color, glow);
@@ -1135,6 +1156,7 @@ function draw(now) {
   ensureTargets(w, h);
   gpuBegin();
 
+  playFrame(now);
   const eye = eyePos();
   const view = M.lookAt(eye, cam.target, [0, 1, 0]);
   const vp = M.mul(M.perspective(0.9, w / h, 0.1, 200), view);
@@ -1431,7 +1453,15 @@ function placeLabels(vp, w, h, now) {
   for (const [id, node] of labelNodes) if (!live.has(id)) { node.remove(); labelNodes.delete(id); }
 }
 
-const audio = { ctx: null, voices: new Map() };
+const audio = { ctx: null, voices: new Map(), noise: null };
+function noiseBuffer(ctx) {
+  if (!audio.noise) {
+    audio.noise = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
+    const d = audio.noise.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  }
+  return audio.noise;
+}
 const WAVES = { sine: "sine", square: "square", saw: "sawtooth", sawtooth: "sawtooth", triangle: "triangle" };
 $("sound").onclick = async () => {
   if (!audio.ctx) audio.ctx = new AudioContext();
@@ -1453,21 +1483,31 @@ function updateAudio(eye, fwd, upv, now) {
     const f = num(e, "sound.freq");
     if (f === undefined) continue;
     live.add(id);
+    const wave = text(e, "sound.wave") === "noise" ? "noise" : WAVES[text(e, "sound.wave")] ?? "sine";
     let v = audio.voices.get(id);
+    if (v && (v.wave === "noise") !== (wave === "noise")) { v.gain.gain.setTargetAtTime(0, t, 0.02); v.src.stop(t + 0.1); v = null; }
     if (!v) {
-      const osc = ctx.createOscillator(), gain = ctx.createGain();
+      const gain = ctx.createGain();
       const pan = new PannerNode(ctx, { panningModel: "HRTF", distanceModel: "inverse", refDistance: 2, rolloffFactor: 1.1 });
       gain.gain.value = 0;
-      osc.connect(gain).connect(pan).connect(ctx.destination);
-      osc.start();
-      v = { osc, gain, pan, wave: "" };
+      let src, tone;
+      if (wave === "noise") {
+        src = new AudioBufferSourceNode(ctx, { buffer: noiseBuffer(ctx), loop: true });
+        tone = new BiquadFilterNode(ctx, { type: "lowpass", Q: 0.7 });
+        src.connect(tone).connect(gain);
+      } else {
+        src = tone = ctx.createOscillator();
+        src.connect(gain);
+      }
+      gain.connect(pan).connect(ctx.destination);
+      src.start();
+      v = { src, tone, gain, pan, wave: "" };
       audio.voices.set(id, v);
     }
-    const wave = WAVES[text(e, "sound.wave")] ?? "sine";
-    if (v.wave !== wave) { v.osc.type = wave; v.wave = wave; }
+    if (v.wave !== wave) { if (wave !== "noise") v.src.type = wave; v.wave = wave; }
     const onv = e.components["sound.on"];
     const on = !onv || !("bool" in onv) || onv.bool;
-    v.osc.frequency.setTargetAtTime(Math.min(8000, Math.max(20, f)), t, 0.015);
+    v.tone.frequency.setTargetAtTime(Math.min(8000, Math.max(20, f)), t, 0.015);
     v.gain.gain.setTargetAtTime(on ? Math.min(1, Math.max(0, num(e, "sound.gain") ?? 0.15)) : 0, t, 0.025);
     const m = motion.get(id);
     const p = toGL(m ? lerp3(m.prev, m.cur, Math.min(1, (now - m.t0) / TICK_MS)) : [0, 0, 0]);
@@ -1476,12 +1516,161 @@ function updateAudio(eye, fwd, upv, now) {
   for (const [id, v] of audio.voices) {
     if (live.has(id)) continue;
     v.gain.gain.setTargetAtTime(0, t, 0.04);
-    v.osc.stop(t + 0.3);
+    v.src.stop(t + 0.3);
     audio.voices.delete(id);
   }
 }
 
 function signal(entity, name, value) { act({ op: "signal", entity, name, value }); }
+
+const play = { active: false, locked: false, avatar: null, pos: null, vz: 0, keys: new Set(), firing: false, weapon: 1,
+  deaths: null, sent: {}, askedAvatar: 0, askedJoin: 0, last: 0 };
+function myName() { return world.you && world.you !== "admin" ? world.you.player : null; }
+function findEntity(test) { for (const [id, e] of world.entities) if (test(e, id)) return id; return null; }
+function myAvatar() {
+  const name = myName();
+  return name ? findEntity((e) => e.owner && e.owner.player === name && e.components.avatar) : null;
+}
+function vitalsOf(av) { const id = findEntity((e) => num(e, "of") === av); return id === null ? null : world.entities.get(id); }
+function spawnPoint() {
+  const a = Math.random() * Math.PI * 2, r = 9 + Math.random() * 5;
+  return [Math.cos(a) * r, Math.sin(a) * r, 0.9];
+}
+function nameColor(name) {
+  let h = 0;
+  for (const c of name) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  const hue = h % 360, f = (n) => { const k = (n + hue / 30) % 12; return 0.55 - 0.45 * Math.max(-1, Math.min(k - 3, 9 - k, 1)); };
+  return "#" + [f(0), f(8), f(4)].map((x) => Math.round(x * 255).toString(16).padStart(2, "0")).join("");
+}
+function solidBoxes() {
+  const out = [];
+  for (const e of world.entities.values()) {
+    const c = e.components;
+    if (text(e, "shape") !== "box" || c.of || c.projectile || c.avatar || num(e, "pos.x") === undefined) continue;
+    if (c.solid && "bool" in c.solid && !c.solid.bool) continue;
+    const size = (num(e, "size") ?? 0.28) * 2, yaw = num(e, "rot.z") ?? 0;
+    out.push({ x: num(e, "pos.x"), y: num(e, "pos.y") ?? 0, z: num(e, "pos.z") ?? 0,
+      hx: Math.abs(num(e, "scale.x") ?? size) / 2, hy: Math.abs(num(e, "scale.y") ?? size) / 2, hz: Math.abs(num(e, "scale.z") ?? size) / 2,
+      c: Math.cos(yaw), s: Math.sin(yaw) });
+  }
+  return out;
+}
+function collide(p, vz) {
+  const R = 0.35;
+  let ground = 0.9;
+  for (const b of solidBoxes()) {
+    const ox = p[0] - b.x, oy = p[1] - b.y;
+    const lx = ox * b.c + oy * b.s, ly = -ox * b.s + oy * b.c;
+    const top = b.z + b.hz, feet = p[2] - 0.9;
+    const insideXY = Math.abs(lx) < b.hx + R * 0.5 && Math.abs(ly) < b.hy + R * 0.5;
+    if (insideXY && feet >= top - 0.35 && vz <= 0) { ground = Math.max(ground, top + 0.9); continue; }
+    if (p[2] + 0.9 < b.z - b.hz || feet > top) continue;
+    const cx = Math.max(-b.hx, Math.min(b.hx, lx)), cy = Math.max(-b.hy, Math.min(b.hy, ly));
+    let nx = lx - cx, ny = ly - cy, d = Math.hypot(nx, ny);
+    if (d >= R) continue;
+    if (d < 1e-6) {
+      const px = b.hx - Math.abs(lx), py = b.hy - Math.abs(ly);
+      if (px < py) { nx = Math.sign(lx) || 1; ny = 0; d = -px; } else { nx = 0; ny = Math.sign(ly) || 1; d = -py; }
+    } else { nx /= d; ny /= d; }
+    const push = R - d;
+    const wx = nx * b.c - ny * b.s, wy = nx * b.s + ny * b.c;
+    p[0] += wx * push; p[1] += wy * push;
+  }
+  return ground;
+}
+function playFrame(now) {
+  const dt = Math.min(0.05, (now - (play.last || now)) / 1000);
+  play.last = now;
+  $("hud").className = play.active ? "on" : "";
+  if (!play.active) return;
+  const av = myAvatar();
+  if (av === null) {
+    play.avatar = null; play.pos = null;
+    if (now - play.askedAvatar > 3000) {
+      play.askedAvatar = now;
+      const p = spawnPoint(), name = myName();
+      const v = (x) => ({ num: x });
+      act({ op: "spawn", components: { avatar: { bool: true }, shape: { text: "cylinder" }, "scale.x": v(0.7), "scale.y": v(0.7), "scale.z": v(1.8),
+        "pos.x": v(p[0]), "pos.y": v(p[1]), "pos.z": v(p[2]), "aim.x": v(1), "aim.y": v(0), "aim.z": v(0), weapon: v(1),
+        color: { text: nameColor(name) }, label: { text: name } } });
+    }
+    $("hudmsg").textContent = "spawning…";
+    return;
+  }
+  const e = world.entities.get(av);
+  if (play.avatar !== av || !play.pos) { play.avatar = av; play.pos = [num(e, "pos.x") ?? 0, num(e, "pos.y") ?? 0, num(e, "pos.z") ?? 0.9]; play.vz = 0; play.deaths = null; }
+  const vit = vitalsOf(av);
+  const dead = vit ? (num(vit, "dead") ?? 0) > 0 : false;
+  if (vit) {
+    const deaths = num(vit, "deaths") ?? 0;
+    if (play.deaths !== null && deaths > play.deaths) { play.pos = spawnPoint(); play.vz = 0; }
+    play.deaths = deaths;
+    const hp = num(vit, "health") ?? 100;
+    $("hpfill").style.width = hp + "%";
+    $("hpfill").style.background = hp > 35 ? "#4ade80" : "#ef4444";
+    $("hudhp").textContent = Math.round(hp);
+  }
+  const arena = findEntity((x) => x.components.arena);
+  $("hudmsg").textContent = dead ? "respawning…" : !play.locked ? "click the view to aim" : arena === null ? "no arena here: ask an admin to install arena" : "";
+  const board = arena === null ? null : text(world.entities.get(arena), "label");
+  $("hudscore").textContent = board ? (board.split("\n").find((l) => l.startsWith(myName() + " ")) || "").trim() : "";
+  $("hudname").textContent = myName();
+  $("hudslot").textContent = play.weapon;
+  const fx = -Math.sin(cam.yaw), fy = Math.cos(cam.yaw), rx = fy, ry = -fx;
+  const k = play.keys, p = play.pos;
+  if (!dead && play.locked) {
+    let mx = (k.has("KeyW") - k.has("KeyS")) * fx + (k.has("KeyD") - k.has("KeyA")) * rx;
+    let my = (k.has("KeyW") - k.has("KeyS")) * fy + (k.has("KeyD") - k.has("KeyA")) * ry;
+    const l = Math.hypot(mx, my), speed = k.has("ShiftLeft") ? 8 : 5;
+    if (l > 0) { p[0] += mx / l * speed * dt; p[1] += my / l * speed * dt; }
+  }
+  play.vz -= 22 * dt;
+  p[2] += play.vz * dt;
+  const ground = collide(p, play.vz);
+  if (p[2] <= ground) {
+    p[2] = ground; play.vz = 0;
+    if (k.has("Space") && !dead && play.locked) play.vz = 8;
+  }
+  p[0] = Math.max(-60, Math.min(60, p[0])); p[1] = Math.max(-60, Math.min(60, p[1]));
+  cam.dist = 3.8;
+  cam.target = toGL([p[0] + rx * 0.6, p[1] + ry * 0.6, p[2] + 0.8]);
+}
+function playNet() {
+  if (!play.active || play.avatar === null || !play.pos) return;
+  const av = play.avatar, now = performance.now();
+  const eye = eyePos(), fwd = norm(sub(cam.target, eye));
+  const far = add(eye, scale(fwd, 40)), farW = [far[0], -far[2], far[1]];
+  const chest = [play.pos[0], play.pos[1], play.pos[2] + 0.3];
+  const aim = norm(sub(farW, chest));
+  const want = { "pos.x": play.pos[0], "pos.y": play.pos[1], "pos.z": play.pos[2], "aim.x": aim[0], "aim.y": aim[1], "aim.z": aim[2], weapon: play.weapon };
+  for (const [key, v] of Object.entries(want)) {
+    const r = Math.round(v * 1000) / 1000;
+    if (play.sent[key] === r && play.sent.av === av) continue;
+    play.sent[key] = r;
+    act({ op: "set", entity: av, key, value: { num: r } });
+  }
+  play.sent.av = av;
+  if (play.firing && play.locked) signal(av, "fire", play.weapon);
+  const arena = findEntity((x) => x.components.arena);
+  if (arena !== null && !vitalsOf(av) && now - play.askedJoin > 2000) { play.askedJoin = now; signal(arena, "join", av); }
+}
+setInterval(playNet, TICK_MS);
+$("play").onclick = () => {
+  if (!myName()) { event("play needs a player view: open ?player=yourname", "bad"); return; }
+  play.active = !play.active;
+  $("play").textContent = play.active ? "stop playing" : "play";
+  if (play.active) { canvas.requestPointerLock(); cam.pitch = 0.25; }
+  else { document.exitPointerLock(); play.firing = false; cam.dist = 14; }
+};
+document.addEventListener("pointerlockchange", () => { play.locked = document.pointerLockElement === canvas; if (!play.locked) play.firing = false; });
+window.addEventListener("keydown", (e) => {
+  if (!play.active || !play.locked) return;
+  if (/^Digit[1-9]$/.test(e.code)) play.weapon = Number(e.code.slice(5));
+  play.keys.add(e.code);
+  e.preventDefault();
+});
+window.addEventListener("keyup", (e) => play.keys.delete(e.code));
+window.addEventListener("blur", () => { play.keys.clear(); play.firing = false; });
 const stats = { grains: 0, frames: [], fps: 0, cpu: 0 };
 
 function rotation(r) {
@@ -1535,8 +1724,15 @@ function pick(px, py) {
 }
 
 let drag = null;
-canvas.addEventListener("mousedown", (e) => { drag = { x: e.clientX, y: e.clientY, moved: false, pan: e.shiftKey || e.button === 2 }; });
+canvas.addEventListener("mousedown", (e) => {
+  if (play.active) {
+    if (!play.locked) canvas.requestPointerLock();
+    else if (e.button === 0) play.firing = true;
+    return;
+  }
+  drag = { x: e.clientX, y: e.clientY, moved: false, pan: e.shiftKey || e.button === 2 }; });
 window.addEventListener("mouseup", (e) => {
+  if (play.active) { play.firing = false; return; }
   if (drag && !drag.moved && e.target === canvas) {
     const dpr = window.devicePixelRatio || 1;
     const hit = pick(e.offsetX * dpr, e.offsetY * dpr);
@@ -1546,6 +1742,11 @@ window.addEventListener("mouseup", (e) => {
   drag = null;
 });
 window.addEventListener("mousemove", (e) => {
+  if (play.locked) {
+    cam.yaw -= e.movementX * 0.0024;
+    cam.pitch = Math.max(-0.55, Math.min(1.25, cam.pitch + e.movementY * 0.0024));
+    return;
+  }
   if (drag) {
     const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
     if (Math.abs(dx) + Math.abs(dy) > 2) drag.moved = true;
@@ -1585,6 +1786,7 @@ canvas.addEventListener("dblclick", (e) => {
 });
 const KEYCODES = { Enter: 13, Backspace: 8, Escape: 27, Tab: 9, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, " ": 32 };
 canvas.addEventListener("keydown", (e) => {
+  if (play.active) return;
   if (!selected || selected.kind !== "entity" || e.metaKey || e.ctrlKey) return;
   const code = KEYCODES[e.key] ?? (e.key.length === 1 ? e.key.codePointAt(0) : undefined);
   if (code === undefined) return;
@@ -1757,7 +1959,11 @@ fetch("/capsules").then((r) => r.json()).then((examples) => {
   for (const name of Object.keys(examples)) {
     const o = document.createElement("option"); o.value = name; o.textContent = name; sel.appendChild(o);
   }
-  sel.onchange = () => { $("source").value = examples[sel.value]; };
+  sel.onchange = () => {
+    $("source").value = examples[sel.value];
+    const av = myAvatar();
+    if (av !== null && (examples[sel.value].includes('"aim.x"'))) $("grants").value = `${av}:r`;
+  };
   sel.value = "helix"; sel.onchange();
 });
 
