@@ -251,6 +251,10 @@ impl World {
         }
         let (next_entity, overlay) = txn.into_parts();
         if overlay.is_empty() {
+            if next_entity != self.next_entity {
+                self.next_entity = next_entity;
+                self.version += 1;
+            }
             return Ok(BTreeSet::new());
         }
         let touched = overlay.keys().copied().collect();

@@ -347,20 +347,20 @@ fn rewrite_then_restore_is_digest_neutral() {
 }
 
 #[test]
-fn spawn_then_despawn_in_one_txn_is_invisible() {
+fn spawn_then_despawn_in_one_txn_leaves_no_entity_but_consumes_the_id() {
     let mut world = World::new();
     world.settle();
-    let before = world.hash();
     let mut txn = world.begin();
     let id = txn.spawn(Owner::Region);
     txn.set(&world, id, "x", Value::Num(9.0)).unwrap();
     txn.despawn(&world, id).unwrap();
-    world.commit(txn).unwrap();
+    assert!(world.commit(txn).unwrap().is_empty());
     world.settle();
-    assert_eq!(world.hash(), before);
+    assert_eq!(world.entities().count(), 0);
+    verify_world(&world, "after a transient entity");
     let mut txn = world.begin();
-    let reused = txn.spawn(Owner::Region);
-    assert_eq!(reused, id, "the never-committed id is reused");
+    let next = txn.spawn(Owner::Region);
+    assert_ne!(next, id, "an entity id is never reused");
 }
 
 #[test]

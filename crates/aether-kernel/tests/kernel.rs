@@ -1001,6 +1001,12 @@ const CHURN: &str = r#"(module
     (drop (call $spawn))
     (call $despawn (local.get $a))))"#;
 
+const FLASH: &str = r#"(module
+  (import "world" "spawn" (func $spawn (result i32)))
+  (import "world" "despawn" (func $despawn (param i32)))
+  (func (export "tick")
+    (call $despawn (call $spawn))))"#;
+
 #[test]
 fn freed_handles_are_reused_so_emitters_run_forever() {
     let law = Law {
@@ -1052,6 +1058,7 @@ fn rules_fingerprint() {
         capsule!("rollback"),
         capsule!("spawner"),
         CHURN,
+        FLASH,
         MATH,
     ] {
         install(&mut k, name, vec![]);
@@ -1093,8 +1100,8 @@ fn rules_fingerprint() {
     assert_eq!(
         (RULES, fingerprint.as_str()),
         (
-            "aether-rules/10",
-            "c4c46c665ec41a1aabf5bbd91523f0599a23415a036538c80bc521276185530d"
+            "aether-rules/11",
+            "6c8ce1c0bd66f582e6c837453d222d93700a9f524ae5ac123a51007e87ff6063"
         ),
         "the kernel's observable behaviour changed: if that is intended, bump RULES and update this fingerprint"
     );
