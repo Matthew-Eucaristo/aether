@@ -99,14 +99,14 @@ async fn untested_or_failing_code_never_reaches_the_real_world() {
             "trial",
             json!({"wat": THIEF, "capsule": -1, "grants": [], "ticks": 5}),
         ),
-        call("2", "install", json!({"wat": THIEF, "grants": []})),
-        call("3", "install", json!({"wat": HELIX, "grants": []})),
+        call("2", "install", json!({})),
+        call("3", "upgrade", json!({"capsule": 0})),
         call(
             "4",
             "trial",
             json!({"wat": HELIX, "capsule": -1, "grants": [], "ticks": 20}),
         ),
-        call("5", "install", json!({"wat": HELIX, "grants": []})),
+        call("5", "install", json!({})),
         call("6", "look", json!({"key": "pos.z", "owner": ""})),
         say("Done: capsule 0 spins a helix."),
     ]);
@@ -132,11 +132,18 @@ async fn untested_or_failing_code_never_reaches_the_real_world() {
         results[0].0
     );
     assert!(
-        results[1].1 && results[1].0.contains("has not passed"),
+        results[1].1 && results[1].0.contains("has not passed cleanly"),
         "{}",
         results[1].0
     );
-    assert!(results[2].1, "helix was not trialled yet");
+    assert!(
+        results[2].1
+            && results[2]
+                .0
+                .contains("nothing has passed a trial for capsule 0"),
+        "{}",
+        results[2].0
+    );
     assert!(
         !results[3].1 && results[3].0.contains("moved"),
         "{}",
@@ -186,13 +193,13 @@ async fn upgrades_are_trialled_against_the_capsule_they_replace() {
     let faster = HELIX.replace("(f64.const 0.03)", "(f64.const 0.09)");
     let model = Scripted::new(vec![
         call("1", "read_capsule", json!({"capsule": 0})),
-        call("2", "upgrade", json!({"capsule": 0, "wat": faster})),
+        call("2", "upgrade", json!({"capsule": 0})),
         call(
             "3",
             "trial",
             json!({"wat": faster, "capsule": 0, "grants": [], "ticks": 10}),
         ),
-        call("4", "upgrade", json!({"capsule": 0, "wat": faster})),
+        call("4", "upgrade", json!({"capsule": 0})),
         say("Faster now."),
     ]);
     realize(&model, &bench, Actor::Admin, "make it climb faster", |_| {})

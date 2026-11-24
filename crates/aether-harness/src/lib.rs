@@ -3,7 +3,7 @@ mod guide;
 mod model;
 mod tools;
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::future::Future;
 
 use aether_kernel::{Action, Actor, BlobHash, Input, InputOutcome, Kernel};
@@ -99,10 +99,16 @@ fn summary(call: &ToolCall) -> String {
     }
 }
 
+struct Tried {
+    wat: String,
+    grants: Vec<aether_kernel::Grant>,
+    clean: bool,
+}
+
 struct Session<'a, B: Bench> {
     bench: &'a B,
     actor: Actor,
-    passed: BTreeSet<(i64, BlobHash)>,
+    trials: BTreeMap<i64, Tried>,
     created: Vec<u64>,
 }
 
@@ -124,13 +130,22 @@ impl<B: Bench> Session<'_, B> {
             },
             "trial" => match parse::<tools::TrialIn>(&call.input) {
                 Ok(input) => {
-                    let key = (input.capsule.max(-1), BlobHash::of(input.wat.as_bytes()));
+                    let key = input.capsule.max(-1);
+                    let wat = input.wat.clone();
+                    let grants = tools::grants(&input.grants);
                     let trial = self
                         .bench
                         .read(move |k| tools::trial(k, &actor, &input))
                         .await?;
+                    self.trials.insert(
+                        key,
+                        Tried {
+                            wat,
+                            grants,
+                            clean: trial.clean,
+                        },
+                    );
                     if trial.clean {
-                        self.passed.insert(key);
                         Ok(trial.report)
                     } else {
                         Err(trial.report)
@@ -138,10 +153,7 @@ impl<B: Bench> Session<'_, B> {
                 }
                 Err(e) => Err(e),
             },
-            "install" => match parse::<tools::InstallIn>(&call.input) {
-                Ok(input) => self.install(input).await?,
-                Err(e) => Err(e),
-            },
+            "install" => self.install().await?,
             "upgrade" => match parse::<tools::UpgradeIn>(&call.input) {
                 Ok(input) => self.upgrade(input).await?,
                 Err(e) => Err(e),
@@ -150,19 +162,29 @@ impl<B: Bench> Session<'_, B> {
         })
     }
 
-    async fn install(
-        &mut self,
-        input: tools::InstallIn,
-    ) -> Result<Result<String, String>, HarnessError> {
-        if !self
-            .passed
-            .contains(&(-1, BlobHash::of(input.wat.as_bytes())))
-        {
-            return Ok(Err(
-                "this exact module has not passed a clean trial as a new capsule yet".into(),
-            ));
+    fn tried(&self, key: i64) -> Result<&Tried, String> {
+        let what = if key < 0 {
+            "a new capsule".to_owned()
+        } else {
+            format!("capsule {key}")
+        };
+        match self.trials.get(&key) {
+            None => Err(format!(
+                "nothing has passed a trial for {what} yet: run trial first"
+            )),
+            Some(t) if !t.clean => Err(format!(
+                "your most recent trial for {what} has not passed cleanly: fix it and run trial again"
+            )),
+            Some(t) => Ok(t),
         }
-        let wasm = self.bench.upload(input.wat.into_bytes()).await?;
+    }
+
+    async fn install(&mut self) -> Result<Result<String, String>, HarnessError> {
+        let (wat, grants) = match self.tried(-1) {
+            Ok(t) => (t.wat.clone(), t.grants.clone()),
+            Err(e) => return Ok(Err(e)),
+        };
+        let wasm = self.bench.upload(wat.into_bytes()).await?;
         let budget = self.bench.read(|k| k.state().law.ceiling).await?;
         let outcome = self
             .bench
@@ -170,7 +192,7 @@ impl<B: Bench> Session<'_, B> {
                 actor: self.actor.clone(),
                 action: Action::Install {
                     wasm,
-                    grants: tools::grants(&input.grants),
+                    grants,
                     budget,
                 },
             })
@@ -189,14 +211,11 @@ impl<B: Bench> Session<'_, B> {
         &mut self,
         input: tools::UpgradeIn,
     ) -> Result<Result<String, String>, HarnessError> {
-        let key = (input.capsule as i64, BlobHash::of(input.wat.as_bytes()));
-        if !self.passed.contains(&key) {
-            return Ok(Err(format!(
-                "this exact module has not passed a clean upgrade trial for capsule {} yet",
-                input.capsule
-            )));
-        }
-        let wasm = self.bench.upload(input.wat.into_bytes()).await?;
+        let wat = match self.tried(input.capsule as i64) {
+            Ok(t) => t.wat.clone(),
+            Err(e) => return Ok(Err(e)),
+        };
+        let wasm = self.bench.upload(wat.into_bytes()).await?;
         let outcome = self
             .bench
             .act(Input {
@@ -234,7 +253,7 @@ pub async fn realize<M: Model, B: Bench>(
     let mut session = Session {
         bench,
         actor,
-        passed: BTreeSet::new(),
+        trials: BTreeMap::new(),
         created: Vec::new(),
     };
     for turn in 1..=MAX_TURNS {

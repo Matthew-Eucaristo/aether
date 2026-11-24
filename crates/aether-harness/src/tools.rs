@@ -85,27 +85,23 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "install",
-            description: "Install a module that passed a clean trial as a new capsule in the real world, acting for the person. Returns the new capsule id.",
+            description: "Install in the real world, acting for the person, exactly the module and grants of your most recent trial with capsule = -1. It refuses when that trial was not clean. Returns the new capsule id.",
             schema: json!({
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["wat", "grants"],
-                "properties": {
-                    "wat": {"type": "string"},
-                    "grants": grants_schema()
-                }
+                "required": [],
+                "properties": {}
             }),
         },
         ToolSpec {
             name: "upgrade",
-            description: "Replace the code of an existing capsule in the real world with a module that passed a clean upgrade trial for that capsule. The capsule keeps its entities and capabilities.",
+            description: "Replace the code of an existing capsule in the real world with exactly the module of your most recent trial for that capsule id. It refuses when that trial was not clean. The capsule keeps its entities and capabilities.",
             schema: json!({
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["capsule", "wat"],
+                "required": ["capsule"],
                 "properties": {
-                    "capsule": {"type": "integer"},
-                    "wat": {"type": "string"}
+                    "capsule": {"type": "integer"}
                 }
             }),
         },
@@ -184,15 +180,8 @@ impl TrialInput {
 }
 
 #[derive(Deserialize)]
-pub struct InstallIn {
-    pub wat: String,
-    pub grants: Vec<GrantIn>,
-}
-
-#[derive(Deserialize)]
 pub struct UpgradeIn {
     pub capsule: u64,
-    pub wat: String,
 }
 
 pub fn owner_label(owner: &Owner) -> String {
@@ -493,6 +482,13 @@ pub fn trial(k: &Kernel, actor: &Actor, input: &TrialIn) -> Trial {
         id.0,
         reports.len()
     );
+    if input.capsule < 0 {
+        let _ = writeln!(
+            out,
+            "That copy is discarded now: capsule {} does not exist in the real world. To test a changed version run trial again with capsule = -1; only install creates it for real.",
+            id.0
+        );
+    }
     if faults.is_empty() {
         let _ = writeln!(out, "No faults.");
     } else {
