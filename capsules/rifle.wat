@@ -58,6 +58,7 @@
   (data (i32.const 312) "sound.freq")
   (data (i32.const 328) "cool")
   (data (i32.const 344) "player")
+  (data (i32.const 352) "dim")
 
   (global $SLOT f64 (f64.const 1))
   (global $DAMAGE f64 (f64.const 8))
@@ -247,6 +248,7 @@
         (call $set_text (local.get $b) (i32.const 208) (i32.const 5) (i32.const 224) (i32.const 7))
         (call $set (local.get $b) (i32.const 232) (i32.const 4) (f64.const 3))
         (call $set (local.get $b) (i32.const 120) (i32.const 10) (global.get $DAMAGE))
+        (call $set (local.get $b) (i32.const 352) (i32.const 3) (call $num (local.get $av) (i32.const 352) (i32.const 3) (f64.const 0)))
         (call $set (local.get $b) (i32.const 136) (i32.const 4) (f64.convert_i64_s (local.get $av)))
         (local.set $p (i32.add (global.get $LIVE) (i32.shl (local.get $n) (i32.const 4))))
         (f64.store (local.get $p) (f64.convert_i32_s (local.get $b)))

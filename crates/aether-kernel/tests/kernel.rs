@@ -1106,6 +1106,7 @@ fn rules_fingerprint() {
                 ("pos.y", Value::Num(3.0)),
                 ("pos.z", Value::Num(6.0 + f64::from(i))),
                 ("vel.x", Value::Num(-1.5)),
+                ("dim", Value::Num(f64::from(i % 2))),
             ],
         );
     }
@@ -1180,8 +1181,8 @@ fn rules_fingerprint() {
     assert_eq!(
         (RULES, fingerprint.as_str()),
         (
-            "aether-rules/15",
-            "9784c74c5c59c2fd29d68ac2a8941865b0c0afb6b567cb425a860f403d1ff256"
+            "aether-rules/16",
+            "26b0fa7a9a182dff9f93b701543858d45415b448ccab1c13312d7d0502e95789"
         ),
         "the kernel's observable behaviour changed: if that is intended, bump RULES and update this fingerprint"
     );

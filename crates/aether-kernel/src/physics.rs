@@ -329,7 +329,12 @@ pub fn step(world: &mut World, law: &Law, touched: &mut BTreeSet<EntityId>) {
     }
     let mut txn = world.begin();
     for (b, (p0, v0)) in bodies.iter_mut().zip(before) {
-        let floor = terrain::height(&law.terrain, b.p[0], b.p[1]) + b.r;
+        let ground = if b.dim == 0 {
+            terrain::height(&law.terrain, b.p[0], b.p[1])
+        } else {
+            0.0
+        };
+        let floor = ground + b.r;
         if b.p[2] <= floor {
             b.p[2] = floor;
             reflect(b, [0.0, 0.0, 1.0]);

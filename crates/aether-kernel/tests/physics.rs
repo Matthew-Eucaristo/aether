@@ -134,3 +134,25 @@ fn only_the_first_bodies_in_the_law_move() {
     assert!(num(&k, first, "pos.z") < 10.0);
     assert_eq!(num(&k, second, "pos.z"), 10.0);
 }
+
+#[test]
+fn other_dimensions_have_a_flat_floor_at_zero() {
+    let terrain = Terrain {
+        seed: 5,
+        relief: 30,
+        scale: 50,
+        plaza: 0,
+    };
+    let mut k = Kernel::new(
+        Law {
+            terrain,
+            ..Law::default()
+        },
+        4,
+    );
+    let mut c = ball(70.0, 20.0, 50.0);
+    c.push(("dim", Value::Num(2.0)));
+    let b = spawn(&mut k, &c);
+    run(&mut k, 120);
+    assert_eq!(num(&k, b, "pos.z"), 0.5);
+}

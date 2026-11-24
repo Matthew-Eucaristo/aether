@@ -562,3 +562,118 @@ fn players_can_visit_a_friend() {
         "budi stands next to ana: {a:?} {b:?}"
     );
 }
+
+#[test]
+fn dimensions_keep_people_bullets_and_floors_apart() {
+    let terrain = aether_kernel::Terrain {
+        seed: 9,
+        relief: 25,
+        scale: 40,
+        plaza: 0,
+    };
+    let mut k = Kernel::new(
+        Law {
+            terrain,
+            ..Law::default()
+        },
+        6,
+    );
+    let realm = install(&mut k, Actor::Admin, REALM, vec![]);
+    let hub = k.state().capsules[&realm].self_entity;
+    step(
+        &mut k,
+        vec![
+            (player("ana"), signal(hub, "join", 0.0)),
+            (player("budi"), signal(hub, "join", 0.0)),
+        ],
+    );
+    let (ana, budi) = (avatar_of(&k, "ana"), avatar_of(&k, "budi"));
+    step(&mut k, vec![(player("ana"), signal(ana, "enter", 3.0))]);
+    step(&mut k, vec![]);
+    assert_eq!(num(&k, ana, "dim"), 3.0);
+    assert_eq!(
+        num(&k, ana, "pos.z"),
+        0.9,
+        "other dimensions have a flat floor"
+    );
+    let bar = k
+        .world()
+        .entities()
+        .find(|(_, e)| e.components.get("of") == Some(&Value::Num(ana.0 as f64)))
+        .map(|(id, _)| id)
+        .unwrap();
+    assert_eq!(num(&k, bar, "dim"), 3.0, "the health bar follows its body");
+    let (ax, ay) = (num(&k, ana, "pos.x"), num(&k, ana, "pos.y"));
+    step(
+        &mut k,
+        vec![
+            (Actor::Admin, set(budi, "pos.x", ax - 4.0)),
+            (Actor::Admin, set(budi, "pos.y", ay)),
+        ],
+    );
+    install(&mut k, player("budi"), RIFLE, read(budi));
+    step(&mut k, vec![(player("budi"), signal(budi, "ax", 1.0))]);
+    fire(&mut k, "budi", budi, 20);
+    for _ in 0..10 {
+        step(&mut k, vec![]);
+    }
+    assert_eq!(
+        entry(&k, realm, ana)[HEALTH],
+        100.0,
+        "bullets from dimension 0 never reach dimension 3"
+    );
+    step(&mut k, vec![(player("ana"), signal(ana, "enter", 0.0))]);
+    step(&mut k, vec![]);
+    let (x, y) = (num(&k, ana, "pos.x"), num(&k, ana, "pos.y"));
+    assert_eq!(num(&k, ana, "dim"), 0.0);
+    assert_eq!(
+        num(&k, ana, "pos.z"),
+        aether_kernel::height(&terrain, x, y) + 0.9,
+        "back home the terrain holds her up"
+    );
+}
+
+#[test]
+fn bullets_only_hit_bodies_in_their_own_dimension() {
+    let Duel {
+        mut k,
+        realm,
+        ana,
+        budi,
+    } = duel();
+    install(&mut k, player("budi"), RIFLE, read(budi));
+    step(&mut k, vec![(player("budi"), signal(budi, "ax", -1.0))]);
+    step(&mut k, vec![(player("ana"), signal(ana, "enter", 7.0))]);
+    step(
+        &mut k,
+        vec![
+            (Actor::Admin, set(ana, "pos.x", 0.0)),
+            (Actor::Admin, set(ana, "pos.y", 0.0)),
+        ],
+    );
+    fire(&mut k, "budi", budi, 15);
+    for _ in 0..5 {
+        step(&mut k, vec![]);
+    }
+    assert_eq!(
+        entry(&k, realm, ana)[HEALTH],
+        100.0,
+        "no hits across dimensions"
+    );
+    step(&mut k, vec![(player("ana"), signal(ana, "enter", 0.0))]);
+    step(
+        &mut k,
+        vec![
+            (Actor::Admin, set(ana, "pos.x", 0.0)),
+            (Actor::Admin, set(ana, "pos.y", 0.0)),
+        ],
+    );
+    fire(&mut k, "budi", budi, 15);
+    for _ in 0..5 {
+        step(&mut k, vec![]);
+    }
+    assert!(
+        entry(&k, realm, ana)[HEALTH] < 100.0,
+        "the same shots land once both stand in one dimension"
+    );
+}
