@@ -211,7 +211,11 @@ impl<B: Bench> Session<'_, B> {
         &mut self,
         input: tools::UpgradeIn,
     ) -> Result<Result<String, String>, HarnessError> {
-        let wat = match self.tried(input.capsule as i64) {
+        let key = match i64::try_from(input.capsule) {
+            Ok(key) => key,
+            Err(_) => return Ok(Err(format!("capsule {} does not exist", input.capsule))),
+        };
+        let wat = match self.tried(key) {
             Ok(t) => t.wat.clone(),
             Err(e) => return Ok(Err(e)),
         };

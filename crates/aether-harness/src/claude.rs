@@ -114,11 +114,15 @@ pub struct Stream {
     message: Value,
     partial: Vec<String>,
     buffer: String,
+    done: bool,
 }
 
 impl Stream {
     pub fn push(&mut self, chunk: &str) -> Result<(), HarnessError> {
-        self.buffer.push_str(&chunk.replace("\r\n", "\n"));
+        self.buffer.push_str(chunk);
+        if self.buffer.contains('\r') {
+            self.buffer = self.buffer.replace("\r\n", "\n");
+        }
         while let Some(end) = self.buffer.find("\n\n") {
             let event: String = self.buffer.drain(..end + 2).collect();
             let data: Vec<&str> = event
@@ -144,17 +148,25 @@ impl Stream {
                 let content = self.message["content"]
                     .as_array_mut()
                     .ok_or_else(|| HarnessError::Network("content before message_start".into()))?;
-                if content.len() <= index {
-                    content.resize(index + 1, Value::Null);
+                if index != content.len() {
+                    return Err(HarnessError::Network(format!(
+                        "content block {index} started after {} blocks",
+                        content.len()
+                    )));
                 }
-                content[index] = event["content_block"].clone();
-                if self.partial.len() <= index {
-                    self.partial.resize(index + 1, String::new());
-                }
+                content.push(event["content_block"].clone());
+                self.partial.resize(index + 1, String::new());
             }
             "content_block_delta" => {
                 let delta = &event["delta"];
-                let block = &mut self.message["content"][index];
+                let content = self.message["content"]
+                    .as_array_mut()
+                    .ok_or_else(|| HarnessError::Network("content before message_start".into()))?;
+                let Some(block) = content.get_mut(index) else {
+                    return Err(HarnessError::Network(format!(
+                        "delta for content block {index} that never started"
+                    )));
+                };
                 match delta["type"].as_str().unwrap_or_default() {
                     "text_delta" => append(block, "text", &delta["text"]),
                     "thinking_delta" => append(block, "thinking", &delta["thinking"]),
@@ -168,7 +180,14 @@ impl Stream {
                 }
             }
             "content_block_stop" => {
-                let block = &mut self.message["content"][index];
+                let content = self.message["content"]
+                    .as_array_mut()
+                    .ok_or_else(|| HarnessError::Network("content before message_start".into()))?;
+                let Some(block) = content.get_mut(index) else {
+                    return Err(HarnessError::Network(format!(
+                        "stop for content block {index} that never started"
+                    )));
+                };
                 if block["type"] == "tool_use" {
                     let raw = self.partial.get(index).map(String::as_str).unwrap_or("");
                     block["input"] = if raw.trim().is_empty() {
@@ -187,6 +206,7 @@ impl Stream {
                     }
                 }
             }
+            "message_stop" => self.done = true,
             "error" => {
                 let message = event["error"]["message"].as_str().unwrap_or("stream error");
                 return Err(HarnessError::Api(0, message.to_owned()));
@@ -196,8 +216,13 @@ impl Stream {
         Ok(())
     }
 
-    pub fn finish(self) -> Value {
-        self.message
+    pub fn finish(self) -> Result<Value, HarnessError> {
+        match self.done {
+            true => Ok(self.message),
+            false => Err(HarnessError::Network(
+                "the stream ended before message_stop".into(),
+            )),
+        }
     }
 }
 
@@ -282,6 +307,6 @@ impl Model for Claude {
                 .expect("the prefix was checked to be UTF-8");
             stream.push(&text)?;
         }
-        parse_response(&stream.finish())
+        parse_response(&stream.finish()?)
     }
 }

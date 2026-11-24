@@ -398,7 +398,7 @@ fn streamed_turns_are_reassembled() {
     for piece in sse.as_bytes().chunks(7) {
         stream.push(std::str::from_utf8(piece).unwrap()).unwrap();
     }
-    let turn = parse_response(&stream.finish()).unwrap();
+    let turn = parse_response(&stream.finish().unwrap()).unwrap();
     assert_eq!(turn.text, "Testing it.");
     assert_eq!(turn.calls[0].name, "trial");
     assert_eq!(turn.calls[0].input["ticks"], 30);
@@ -409,7 +409,7 @@ fn streamed_turns_are_reassembled() {
     cut.push(&sse.replace("\"tool_use\"},\"usage", "\"max_tokens\"},\"usage"))
         .unwrap();
     assert!(matches!(
-        parse_response(&cut.finish()),
+        parse_response(&cut.finish().unwrap()),
         Err(HarnessError::Truncated)
     ));
 }
