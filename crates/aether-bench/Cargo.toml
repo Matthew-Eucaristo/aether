@@ -1,0 +1,10 @@
+[package]
+name = "aether-bench"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+aether-kernel = { version = "0.1.0", path = "../aether-kernel" }
+aether-store = { version = "0.1.0", path = "../aether-store" }
+aether-world = { version = "0.1.0", path = "../aether-world" }

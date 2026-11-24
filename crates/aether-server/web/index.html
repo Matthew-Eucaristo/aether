@@ -1,0 +1,823 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Aether</title>
+<style>
+  :root { --bg:#0b0d12; --panel:#141821; --line:#252b37; --text:#d8dce4; --dim:#8a93a3; --accent:#5aa9ff; --bad:#ff6b6b; --ok:#5fd38d; --warn:#f0b54a; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; background:var(--bg); color:var(--text); display:grid; grid-template-columns:1fr minmax(320px, 30vw); grid-template-rows:auto 1fr; height:100vh; overflow:hidden; }
+  header { grid-column:1/3; display:flex; gap:18px; align-items:center; padding:8px 14px; border-bottom:1px solid var(--line); background:var(--panel); }
+  header b { color:var(--accent); font-weight:600; }
+  #status.off { color:var(--bad); }
+  main { position:relative; overflow:hidden; }
+  #view { width:100%; height:100%; display:block; cursor:grab; }
+  #view:active { cursor:grabbing; }
+  #beat { position:absolute; left:12px; right:12px; bottom:12px; height:84px; width:calc(100% - 24px); background:rgba(11,13,18,.82); border:1px solid var(--line); border-radius:6px; }
+  #legend { position:absolute; left:12px; top:12px; background:rgba(11,13,18,.82); border:1px solid var(--line); border-radius:6px; padding:8px 10px; color:var(--dim); font-size:11px; line-height:1.6; }
+  #legend i { display:inline-block; width:18px; height:2px; vertical-align:middle; margin-right:6px; }
+  #tip { position:absolute; pointer-events:none; background:rgba(20,24,33,.95); border:1px solid var(--line); border-radius:4px; padding:4px 8px; font-size:11px; display:none; white-space:pre; }
+  aside { overflow-y:auto; border-left:1px solid var(--line); background:var(--panel); }
+  section { border-bottom:1px solid var(--line); padding:10px 12px; }
+  h2 { margin:0 0 8px; font-size:11px; text-transform:uppercase; letter-spacing:.07em; color:var(--dim); font-weight:600; }
+  table { width:100%; border-collapse:collapse; }
+  td, th { text-align:left; padding:2px 4px; vertical-align:top; }
+  th { color:var(--dim); font-weight:normal; }
+  tr.sel td { background:#1f2d47; }
+  tr.click { cursor:pointer; }
+  tr.click:hover td { background:#1a2130; }
+  textarea, input, select, button { font:inherit; color:var(--text); background:#0b0d12; border:1px solid var(--line); border-radius:4px; padding:4px 6px; }
+  textarea { width:100%; height:140px; resize:vertical; }
+  input { width:100%; }
+  button { cursor:pointer; background:#1d2533; }
+  button:hover { border-color:var(--accent); }
+  pre { margin:6px 0 0; max-height:260px; overflow:auto; background:#0b0d12; border:1px solid var(--line); border-radius:4px; padding:6px; font-size:11px; }
+  .row { display:flex; gap:6px; margin-top:6px; }
+  .row > * { flex:1; }
+  .active { color:var(--ok); } .suspended { color:var(--bad); }
+  .fault { color:var(--warn); } .dim { color:var(--dim); }
+  a.link { color:var(--accent); cursor:pointer; text-decoration:underline; }
+  #harness .step { margin-top:4px; }
+  #harness .ok { color:var(--ok); } #harness .fail { color:var(--warn); } #harness .said { color:var(--text); }
+  #harness details pre { max-height:180px; }
+  #events { height:160px; overflow-y:auto; white-space:pre-wrap; color:var(--dim); }
+  #events .bad { color:var(--bad); } #events .good { color:var(--ok); } #events .log { color:var(--accent); }
+  .hint { color:var(--dim); font-size:11px; margin-top:4px; }
+</style>
+</head>
+<body>
+<header>
+  <span>Aether</span>
+  <span>you: <b id="you">…</b></span>
+  <span>tick <b id="tick">0</b></span>
+  <span>entities <b id="count">0</b></span>
+  <span>capsules <b id="ncaps">0</b></span>
+  <span title="state hash after the last tick">hash <b id="hash">…</b></span>
+  <span id="status" class="off">connecting</span>
+</header>
+<main>
+  <canvas id="view"></canvas>
+  <div id="legend">
+    <div><i style="background:#5fd38d"></i>capsule (code) · ring above the world</div>
+    <div><i style="background:#8f9bb3"></i>capsule owns entity</div>
+    <div><i style="background:#f0b54a"></i>capsule may write entity</div>
+    <div><i style="background:#3d6fae"></i>capsule may read entity</div>
+    <div>drag: orbit · shift-drag: pan · wheel: zoom · click: inspect</div>
+  </div>
+  <div id="tip"></div>
+  <canvas id="beat"></canvas>
+</main>
+<aside>
+  <section>
+    <h2>Create with AI</h2>
+    <textarea id="intent" style="height:64px" placeholder="Describe what should exist, e.g. three red moons orbiting a slowly bobbing blue sun"></textarea>
+    <div class="row"><button id="realize">Make it real</button></div>
+    <div id="harness" class="hint">The AI writes a capsule, tests it on a private copy of the world, fixes what fails, and only then installs it.</div>
+  </section>
+  <section>
+    <h2>Inspector</h2>
+    <div id="inspect" class="hint">Click a capsule (on the ring) or an entity to see who controls it and the code behind it.</div>
+  </section>
+  <section>
+    <h2>Capsules</h2>
+    <table id="capsules"></table>
+  </section>
+  <section>
+    <h2>Code</h2>
+    <div class="row"><select id="example"></select></div>
+    <textarea id="source" spellcheck="false"></textarea>
+    <div class="row"><input id="grants" placeholder="grants for install, e.g. 3:w 5:r"></div>
+    <div class="row"><button id="install">Install as new capsule</button><button id="upgrade">Upgrade selected capsule</button></div>
+    <div class="hint">Handle 0 is the capsule's own entity; grants become handles 1, 2, … in order. Upgrade keeps the capsule's entities and capabilities.</div>
+  </section>
+  <section>
+    <h2>Spawn</h2>
+    <input id="components" value='{"pos.x": 0, "pos.y": 2, "pos.z": 1, "color": "#5aa9ff"}'>
+    <div class="row"><button id="spawn">Spawn entity</button></div>
+  </section>
+  <section>
+    <h2>Entities</h2>
+    <table id="entities"></table>
+  </section>
+  <section id="lawbox">
+    <h2>Region law</h2>
+    <textarea id="law" spellcheck="false"></textarea>
+    <div class="row"><button id="setlaw">Apply law</button></div>
+  </section>
+  <section>
+    <h2>Events</h2>
+    <div id="events"></div>
+  </section>
+</aside>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const TICK_MS = 100;
+const world = { entities: new Map(), capsules: {}, law: null, tick: 0, runs: {}, you: null };
+const motion = new Map();
+const history = [];
+const fuelHistory = {};
+let selected = null;
+let uploads = new Map();
+let uploadId = 0;
+let sourceShown = null;
+
+const params = new URLSearchParams(location.search);
+const wsUrl = new URL("/ws", location.href);
+wsUrl.protocol = location.protocol === "https:" ? "wss:" : "ws:";
+if (params.get("token")) wsUrl.searchParams.set("token", params.get("token"));
+else wsUrl.searchParams.set("player", params.get("player") || "guest");
+const socket = new WebSocket(wsUrl);
+
+function send(msg) { socket.send(JSON.stringify(msg)); }
+function act(action) { send({ type: "act", action }); }
+function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]); }
+
+function event(text, cls) {
+  const el = document.createElement("div");
+  el.textContent = `[${world.tick}] ${text}`;
+  if (cls) el.className = cls;
+  const box = $("events");
+  box.appendChild(el);
+  while (box.childElementCount > 300) box.firstChild.remove();
+  box.scrollTop = box.scrollHeight;
+}
+
+function actorName(a) { return a === "admin" ? "admin" : a.player; }
+function ownerName(o) {
+  if (o === "region") return "region";
+  if (o.player) return "player " + o.player;
+  return "capsule " + o.capsule;
+}
+function show(v) {
+  if ("num" in v) return String(Math.round(v.num * 1000) / 1000);
+  if ("text" in v) return JSON.stringify(v.text);
+  return String(v.bool);
+}
+function toValue(raw) {
+  const v = JSON.parse(raw);
+  if (typeof v === "number") return { num: v };
+  if (typeof v === "string") return { text: v };
+  if (typeof v === "boolean") return { bool: v };
+  throw new Error("value must be a number, string or boolean");
+}
+function num(e, key) { const v = e.components[key]; return v && "num" in v ? v.num : undefined; }
+function describeOutcome(o) {
+  if (o === "applied") return ["applied", "good"];
+  if (o.spawned !== undefined) return ["spawned entity " + o.spawned, "good"];
+  if (o.installed !== undefined) return ["installed capsule " + o.installed, "good"];
+  if (o.granted !== undefined) return ["granted handle " + o.granted, "good"];
+  return ["rejected: " + o.rejected, "bad"];
+}
+function describeFault(f) {
+  if (f === "out_of_fuel") return "out of fuel";
+  if (f === "depth_limit") return "call depth limit";
+  if (f.denied) return "denied: " + f.denied;
+  return "trap: " + f.trap;
+}
+function hue(n) { return 95 + (n * 137.508) % 200; }
+function hsl(h, s, l) {
+  s /= 100; l /= 100;
+  const k = (n) => (n + h / 30) % 12, a = s * Math.min(l, 1 - l);
+  const f = (n) => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+  return [f(0), f(8), f(4)];
+}
+function hexColor(text) {
+  const m = /^#([0-9a-f]{6})$/i.exec(text || "");
+  if (!m) return null;
+  const n = parseInt(m[1], 16);
+  return [(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255];
+}
+function entityColor(id, e) {
+  const c = e.components.color;
+  const fromText = c && "text" in c ? hexColor(c.text) : null;
+  if (fromText) return fromText;
+  const o = e.owner;
+  const key = o === "region" ? 0 : o.player ? [...o.player].reduce((a, ch) => a * 31 + ch.charCodeAt(0), 7) : 1000 + o.capsule;
+  return hsl(hue(key), 55, 62);
+}
+function placedPos(e) {
+  const x = num(e, "pos.x");
+  if (x === undefined) return null;
+  return [x, num(e, "pos.y") ?? 0, num(e, "pos.z") ?? 0];
+}
+
+function setEntity(id, e, now, fresh) {
+  if (!e) { world.entities.delete(id); motion.delete(id); return; }
+  world.entities.set(id, e);
+  const p = placedPos(e);
+  if (!p) { motion.delete(id); return; }
+  const m = motion.get(id);
+  if (!m || fresh) {
+    motion.set(id, { prev: p, cur: p, t0: now, trail: [p] });
+  } else {
+    m.prev = lerp3(m.prev, m.cur, Math.min(1, (now - m.t0) / TICK_MS));
+    m.cur = p; m.t0 = now;
+    m.trail.push(p);
+    if (m.trail.length > 40) m.trail.shift();
+  }
+}
+function lerp3(a, b, t) { return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]; }
+
+socket.onopen = () => { $("status").textContent = "live"; $("status").className = ""; };
+socket.onclose = () => { $("status").textContent = "disconnected"; $("status").className = "off"; };
+socket.onmessage = (ev) => {
+  const msg = JSON.parse(ev.data);
+  const now = performance.now();
+  if (msg.type === "hello") {
+    world.you = msg.you;
+    world.entities.clear(); motion.clear();
+    for (const [id, e] of Object.entries(msg.state.world.entities)) setEntity(Number(id), e, now, true);
+    world.capsules = msg.state.capsules;
+    world.law = msg.state.law;
+    world.tick = msg.state.world.tick;
+    $("you").textContent = actorName(msg.you);
+    $("hash").textContent = msg.head.slice(0, 12);
+    $("law").value = JSON.stringify(world.law, null, 1);
+    $("lawbox").style.display = msg.you === "admin" ? "" : "none";
+    renderPanels();
+  } else if (msg.type === "tick") {
+    const r = msg.report;
+    world.tick = r.tick;
+    for (const [id, e] of Object.entries(msg.changed)) setEntity(Number(id), e, now, false);
+    world.capsules = msg.capsules;
+    if (JSON.stringify(world.law) !== JSON.stringify(msg.law)) {
+      world.law = msg.law;
+      $("law").value = JSON.stringify(world.law, null, 1);
+    }
+    let rejected = 0;
+    msg.inputs.forEach((input, i) => {
+      const [text, cls] = describeOutcome(r.inputs[i]);
+      if (cls === "bad") rejected++;
+      event(`${actorName(input.actor)} ${input.action.op}: ${text}`, cls);
+    });
+    for (const run of r.runs) {
+      const prev = world.runs[run.capsule];
+      world.runs[run.capsule] = run;
+      const fh = (fuelHistory[run.capsule] ||= []);
+      fh.push(run.fault ? -1 : run.fuel_used);
+      if (fh.length > 120) fh.shift();
+      for (const line of run.log) event(`capsule ${run.capsule}: ${line}`, "log");
+      if (run.fault && (!prev || JSON.stringify(prev.fault) !== JSON.stringify(run.fault) || run.suspended))
+        event(`capsule ${run.capsule} ${describeFault(run.fault)}${run.suspended ? " -> suspended" : ""}`, "bad");
+    }
+    history.push({ tick: r.tick, inputs: msg.inputs.length, rejected, touched: r.touched.length,
+      runs: r.runs.map((x) => ({ capsule: x.capsule, fuel: x.fuel_used, fault: !!x.fault })) });
+    if (history.length > 240) history.shift();
+    $("hash").textContent = r.state_hash.slice(0, 12);
+    renderPanels();
+  } else if (msg.type === "harness") {
+    harnessEvent(msg.event);
+  } else if (msg.type === "harness_done") {
+    harnessLine(`<div class="said">${esc(msg.reply)}</div>`);
+    $("realize").disabled = false;
+    if (msg.capsules.length) { selected = { kind: "capsule", id: msg.capsules[msg.capsules.length - 1] }; renderPanels(); }
+  } else if (msg.type === "harness_failed") {
+    harnessLine(`<div class="fail">${esc(msg.error)}</div>`);
+    $("realize").disabled = false;
+  } else if (msg.type === "busy") {
+    event("the world is busy; that request was dropped", "bad");
+  } else if (msg.type === "uploaded") {
+    const done = uploads.get(msg.id);
+    uploads.delete(msg.id);
+    if (done) done(msg.result);
+  }
+};
+
+function harnessLine(html) {
+  const box = $("harness");
+  const div = document.createElement("div");
+  div.className = "step";
+  div.innerHTML = html;
+  box.appendChild(div);
+  box.scrollIntoView({ block: "nearest" });
+}
+function harnessEvent(e) {
+  if (e.event === "turn") harnessLine(`<span class="dim">${esc(e.model)} · turn ${e.turn}</span>`);
+  else if (e.event === "said") harnessLine(`<div class="said">${esc(e.text)}</div>`);
+  else if (e.event === "tool") harnessLine(`→ <b>${esc(e.name)}</b> <span class="dim">${esc(e.summary)}</span>`);
+  else if (e.event === "tool_done") harnessLine(`<details><summary class="${e.ok ? "ok" : "fail"}">${e.ok ? "✓" : "✗"} ${esc(e.name)}: ${esc(e.detail.split("\n")[0])}</summary><pre>${esc(e.detail)}</pre></details>`);
+}
+
+function upload(source) {
+  return new Promise((resolve, reject) => {
+    const id = ++uploadId;
+    uploads.set(id, (result) => result.Ok ? resolve(result.Ok) : reject(new Error(result.Err)));
+    send({ type: "upload", id, source });
+  });
+}
+
+const M = {
+  perspective(fovy, aspect, near, far) {
+    const f = 1 / Math.tan(fovy / 2), nf = 1 / (near - far);
+    return new Float32Array([f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, (far + near) * nf, -1, 0, 0, 2 * far * near * nf, 0]);
+  },
+  lookAt(eye, at, up) {
+    const z = norm(sub(eye, at)), x = norm(cross(up, z)), y = cross(z, x);
+    return new Float32Array([x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0,
+      -dot(x, eye), -dot(y, eye), -dot(z, eye), 1]);
+  },
+  mul(a, b) {
+    const o = new Float32Array(16);
+    for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) {
+      let s = 0;
+      for (let k = 0; k < 4; k++) s += a[k * 4 + r] * b[c * 4 + k];
+      o[c * 4 + r] = s;
+    }
+    return o;
+  },
+};
+function sub(a, b) { return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]; }
+function add(a, b) { return [a[0] + b[0], a[1] + b[1], a[2] + b[2]]; }
+function scale(a, s) { return [a[0] * s, a[1] * s, a[2] * s]; }
+function dot(a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+function cross(a, b) { return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]; }
+function norm(a) { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; }
+function toGL(p) { return [p[0], p[2], -p[1]]; }
+
+const canvas = $("view");
+const gl = canvas.getContext("webgl2", { antialias: true });
+if (!gl) {
+  $("legend").textContent = "This browser has no WebGL2, so the 3D view is unavailable.";
+  throw new Error("WebGL2 unavailable");
+}
+
+function program(vs, fs) {
+  const p = gl.createProgram();
+  for (const [type, src] of [[gl.VERTEX_SHADER, vs], [gl.FRAGMENT_SHADER, fs]]) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+    gl.attachShader(p, s);
+  }
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  return p;
+}
+
+const meshProg = program(`#version 300 es
+layout(location=0) in vec3 a_pos;
+layout(location=1) in vec3 a_nrm;
+layout(location=2) in vec4 i_at;
+layout(location=3) in vec4 i_color;
+uniform mat4 u_vp;
+out vec3 v_nrm; out vec4 v_color; out vec3 v_world;
+void main() {
+  vec3 w = a_pos * i_at.w + i_at.xyz;
+  v_world = w; v_nrm = a_nrm; v_color = i_color;
+  gl_Position = u_vp * vec4(w, 1.0);
+}`, `#version 300 es
+precision highp float;
+in vec3 v_nrm; in vec4 v_color; in vec3 v_world;
+uniform vec3 u_eye;
+out vec4 o;
+void main() {
+  vec3 n = normalize(v_nrm);
+  float d = max(dot(n, normalize(vec3(0.4, 1.0, 0.3))), 0.0);
+  float hemi = 0.5 + 0.5 * n.y;
+  float rim = pow(1.0 - max(dot(n, normalize(u_eye - v_world)), 0.0), 2.5);
+  vec3 c = v_color.rgb * (0.22 + 0.58 * d + 0.2 * hemi) + rim * 0.45 * v_color.rgb + v_color.a * v_color.rgb;
+  o = vec4(c, 1.0);
+}`);
+
+const lineProg = program(`#version 300 es
+layout(location=0) in vec3 a_pos;
+layout(location=1) in vec4 a_color;
+uniform mat4 u_vp;
+out vec4 v_color; out vec3 v_world;
+void main() { v_color = a_color; v_world = a_pos; gl_Position = u_vp * vec4(a_pos, 1.0); }`, `#version 300 es
+precision highp float;
+in vec4 v_color; in vec3 v_world;
+uniform vec3 u_eye;
+out vec4 o;
+void main() {
+  float fade = clamp(1.4 - length(v_world - u_eye) / 45.0, 0.0, 1.0);
+  o = vec4(v_color.rgb, v_color.a * fade);
+}`);
+
+function sphere(lat, lon) {
+  const v = [], idx = [];
+  for (let i = 0; i <= lat; i++) {
+    const th = i * Math.PI / lat;
+    for (let j = 0; j <= lon; j++) {
+      const ph = j * 2 * Math.PI / lon;
+      const n = [Math.sin(th) * Math.cos(ph), Math.cos(th), Math.sin(th) * Math.sin(ph)];
+      v.push(...n, ...n);
+    }
+  }
+  for (let i = 0; i < lat; i++) for (let j = 0; j < lon; j++) {
+    const a = i * (lon + 1) + j, b = a + lon + 1;
+    idx.push(a, b, a + 1, b, b + 1, a + 1);
+  }
+  return { v: new Float32Array(v), i: new Uint16Array(idx) };
+}
+const ball = sphere(12, 20);
+const meshVao = gl.createVertexArray();
+gl.bindVertexArray(meshVao);
+const meshVbo = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, meshVbo);
+gl.bufferData(gl.ARRAY_BUFFER, ball.v, gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
+gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
+const meshIbo = gl.createBuffer();
+gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, meshIbo);
+gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, ball.i, gl.STATIC_DRAW);
+const instVbo = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, instVbo);
+gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 4, gl.FLOAT, false, 32, 0); gl.vertexAttribDivisor(2, 1);
+gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3, 4, gl.FLOAT, false, 32, 16); gl.vertexAttribDivisor(3, 1);
+
+const lineVao = gl.createVertexArray();
+gl.bindVertexArray(lineVao);
+const lineVbo = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, lineVbo);
+gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 28, 0);
+gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 4, gl.FLOAT, false, 28, 12);
+gl.bindVertexArray(null);
+
+const cam = { yaw: 0.7, pitch: 0.42, dist: 26, target: [0, 2.2, 0] };
+function eyePos() {
+  const cp = Math.cos(cam.pitch);
+  return add(cam.target, scale([Math.sin(cam.yaw) * cp, Math.sin(cam.pitch), Math.cos(cam.yaw) * cp], cam.dist));
+}
+
+const RING = 8, RING_Y = 5.5;
+function capsuleIds() { return Object.keys(world.capsules).map(Number).sort((a, b) => a - b); }
+function capsuleNode(id, ids) {
+  const i = ids.indexOf(id), n = Math.max(ids.length, 1);
+  const a = (i / n) * Math.PI * 2 + 0.3;
+  return [Math.cos(a) * RING, RING_Y + 0.4 * Math.sin(a * 3), Math.sin(a) * RING];
+}
+
+function frameScene(now) {
+  const ents = [];
+  for (const [id, m] of motion) {
+    const e = world.entities.get(id);
+    if (!e) continue;
+    const p = lerp3(m.prev, m.cur, Math.min(1, (now - m.t0) / TICK_MS));
+    const s = num(e, "size") ?? 0.28;
+    ents.push({ kind: "entity", id, pos: toGL(p), radius: Math.max(0.08, Math.min(s, 3)), color: entityColor(id, e), m });
+  }
+  const ids = capsuleIds();
+  const caps = ids.map((id) => {
+    const c = world.capsules[id];
+    const run = world.runs[id];
+    const pulse = run && run.fault ? 0.35 : 0;
+    const color = c.status === "suspended" ? [1, 0.42, 0.42] : run && run.fault ? [0.94, 0.71, 0.29] : [0.37, 0.83, 0.55];
+    return { kind: "capsule", id, pos: capsuleNode(id, ids), radius: 0.42, color, glow: pulse };
+  });
+  return { ents, caps };
+}
+
+function pushLine(out, a, b, c, alpha) { out.push(...a, ...c, alpha, ...b, ...c, alpha); }
+
+function draw(now) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.floor(canvas.clientWidth * dpr), h = Math.floor(canvas.clientHeight * dpr);
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+  gl.viewport(0, 0, w, h);
+  gl.clearColor(0.043, 0.051, 0.07, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.enable(gl.DEPTH_TEST);
+
+  const eye = eyePos();
+  const vp = M.mul(M.perspective(0.9, w / h, 0.1, 200), M.lookAt(eye, cam.target, [0, 1, 0]));
+  const { ents, caps } = frameScene(now);
+  const byId = new Map(ents.map((e) => [e.id, e]));
+
+  const lines = [];
+  for (let i = -20; i <= 20; i++) {
+    const a = i % 5 === 0 ? 0.32 : 0.14;
+    pushLine(lines, [i, 0, -20], [i, 0, 20], [0.45, 0.52, 0.66], a);
+    pushLine(lines, [-20, 0, i], [20, 0, i], [0.45, 0.52, 0.66], a);
+  }
+  pushLine(lines, [0, 0, 0], [3, 0, 0], [0.9, 0.4, 0.4], 0.8);
+  pushLine(lines, [0, 0, 0], [0, 0, -3], [0.4, 0.9, 0.5], 0.8);
+  pushLine(lines, [0, 0, 0], [0, 3, 0], [0.4, 0.6, 1], 0.8);
+  for (const e of ents) {
+    const t = e.m.trail;
+    for (let i = 1; i < t.length; i++)
+      pushLine(lines, toGL(t[i - 1]), toGL(t[i]), e.color, 0.55 * i / t.length);
+    if (e.pos[1] > 0.05) pushLine(lines, e.pos, [e.pos[0], 0, e.pos[2]], e.color, 0.12);
+  }
+  for (const c of caps) {
+    const cap = world.capsules[c.id];
+    const sel = selected && selected.kind === "capsule" && selected.id === c.id;
+    for (const e of ents) {
+      const o = world.entities.get(e.id).owner;
+      if (o.capsule === c.id) pushLine(lines, c.pos, e.pos, [0.56, 0.61, 0.7], sel ? 0.7 : 0.22);
+    }
+    cap.clist.forEach((slot, handle) => {
+      if (!slot || handle === 0) return;
+      const target = byId.get(slot.entity);
+      if (!target || world.entities.get(slot.entity).owner.capsule === c.id) return;
+      pushLine(lines, c.pos, target.pos, slot.write ? [0.94, 0.71, 0.29] : [0.24, 0.44, 0.68], sel ? 0.95 : 0.6);
+    });
+  }
+  const focus = selected && (selected.kind === "capsule" ? caps : ents).find((x) => x.id === selected.id);
+  if (focus) {
+    const r = focus.radius * 1.9;
+    for (let i = 0; i < 48; i++) {
+      const a = i / 48 * Math.PI * 2, b = (i + 1) / 48 * Math.PI * 2;
+      pushLine(lines, add(focus.pos, [Math.cos(a) * r, 0, Math.sin(a) * r]), add(focus.pos, [Math.cos(b) * r, 0, Math.sin(b) * r]), [1, 1, 1], 0.9);
+    }
+  }
+
+  const inst = new Float32Array((ents.length + caps.length) * 8);
+  [...ents, ...caps].forEach((x, i) => {
+    const glow = x.glow ?? 0;
+    inst.set([...x.pos, x.radius, ...x.color, glow], i * 8);
+  });
+  gl.useProgram(meshProg);
+  gl.uniformMatrix4fv(gl.getUniformLocation(meshProg, "u_vp"), false, vp);
+  gl.uniform3fv(gl.getUniformLocation(meshProg, "u_eye"), eye);
+  gl.bindVertexArray(meshVao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, instVbo);
+  gl.bufferData(gl.ARRAY_BUFFER, inst, gl.DYNAMIC_DRAW);
+  gl.drawElementsInstanced(gl.TRIANGLES, ball.i.length, gl.UNSIGNED_SHORT, 0, ents.length + caps.length);
+
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  gl.depthMask(false);
+  gl.useProgram(lineProg);
+  gl.uniformMatrix4fv(gl.getUniformLocation(lineProg, "u_vp"), false, vp);
+  gl.uniform3fv(gl.getUniformLocation(lineProg, "u_eye"), eye);
+  gl.bindVertexArray(lineVao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, lineVbo);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(lines), gl.DYNAMIC_DRAW);
+  gl.drawArrays(gl.LINES, 0, lines.length / 7);
+  gl.depthMask(true);
+  gl.disable(gl.BLEND);
+  gl.bindVertexArray(null);
+
+  lastScene = { ents, caps, eye, w, h };
+  drawBeat();
+  requestAnimationFrame(draw);
+}
+let lastScene = null;
+
+function pick(px, py) {
+  if (!lastScene) return null;
+  const { ents, caps, eye, w, h } = lastScene;
+  const fwd = norm(sub(cam.target, eye));
+  const right = norm(cross(fwd, [0, 1, 0]));
+  const up = cross(right, fwd);
+  const t = Math.tan(0.45);
+  const nx = (px / w) * 2 - 1, ny = 1 - (py / h) * 2;
+  const dir = norm(add(fwd, add(scale(right, nx * t * w / h), scale(up, ny * t))));
+  let best = null, bestT = Infinity;
+  for (const x of [...ents, ...caps]) {
+    const oc = sub(eye, x.pos);
+    const b = dot(oc, dir), c = dot(oc, oc) - (x.radius * 1.4) ** 2;
+    const disc = b * b - c;
+    if (disc < 0) continue;
+    const hit = -b - Math.sqrt(disc);
+    if (hit > 0 && hit < bestT) { bestT = hit; best = x; }
+  }
+  return best;
+}
+
+let drag = null;
+canvas.addEventListener("mousedown", (e) => { drag = { x: e.clientX, y: e.clientY, moved: false, pan: e.shiftKey || e.button === 2 }; });
+window.addEventListener("mouseup", (e) => {
+  if (drag && !drag.moved && e.target === canvas) {
+    const dpr = window.devicePixelRatio || 1;
+    const hit = pick(e.offsetX * dpr, e.offsetY * dpr);
+    selected = hit ? { kind: hit.kind, id: hit.id } : null;
+    renderPanels();
+  }
+  drag = null;
+});
+window.addEventListener("mousemove", (e) => {
+  if (drag) {
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    if (Math.abs(dx) + Math.abs(dy) > 2) drag.moved = true;
+    drag.x = e.clientX; drag.y = e.clientY;
+    if (drag.pan) {
+      const eye = eyePos();
+      const fwd = norm(sub(cam.target, eye)), right = norm(cross(fwd, [0, 1, 0]));
+      const s = cam.dist * 0.0016;
+      cam.target = add(cam.target, add(scale(right, -dx * s), [0, dy * s, 0]));
+    } else {
+      cam.yaw -= dx * 0.006;
+      cam.pitch = Math.max(-0.2, Math.min(1.45, cam.pitch + dy * 0.006));
+    }
+    $("tip").style.display = "none";
+    return;
+  }
+  if (e.target !== canvas) { $("tip").style.display = "none"; return; }
+  const dpr = window.devicePixelRatio || 1;
+  const hit = pick(e.offsetX * dpr, e.offsetY * dpr);
+  const tip = $("tip");
+  if (!hit) { tip.style.display = "none"; return; }
+  if (hit.kind === "capsule") {
+    const c = world.capsules[hit.id], run = world.runs[hit.id];
+    tip.textContent = `capsule ${hit.id} · ${c.status} · by ${actorName(c.installer)}\n${run ? (run.fault ? describeFault(run.fault) : run.fuel_used + " fuel last tick") : ""}`;
+  } else {
+    const ent = world.entities.get(hit.id);
+    const comps = Object.entries(ent.components).slice(0, 6).map(([k, v]) => `${k}=${show(v)}`).join("\n");
+    tip.textContent = `entity ${hit.id} · ${ownerName(ent.owner)}\n${comps}`;
+  }
+  tip.style.left = e.offsetX + 14 + "px"; tip.style.top = e.offsetY + 10 + "px"; tip.style.display = "block";
+});
+canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+canvas.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  cam.dist = Math.max(3, Math.min(80, cam.dist * Math.exp(e.deltaY * 0.001)));
+}, { passive: false });
+
+const beat = $("beat"), bctx = beat.getContext("2d");
+function drawBeat() {
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.floor(beat.clientWidth * dpr), h = Math.floor(beat.clientHeight * dpr);
+  if (beat.width !== w || beat.height !== h) { beat.width = w; beat.height = h; }
+  bctx.clearRect(0, 0, w, h);
+  const pad = 6 * dpr, top = 16 * dpr, base = h - pad, usable = base - top;
+  bctx.fillStyle = "#8a93a3";
+  bctx.font = `${10 * dpr}px ui-monospace, monospace`;
+  bctx.fillText("heartbeat · one column per tick · height = fuel each capsule burned · red = fault · white = player inputs", pad, 11 * dpr);
+  const cols = 240, cw = (w - pad * 2) / cols;
+  const ceiling = world.law ? world.law.ceiling.fuel_per_tick : 1e6;
+  const scaleY = (f) => Math.min(usable, Math.log10(1 + f) / Math.log10(1 + ceiling) * usable);
+  const start = cols - history.length;
+  history.forEach((t, i) => {
+    const x = pad + (start + i) * cw;
+    let y = base;
+    for (const r of t.runs) {
+      const [cr, cg, cb] = hsl(hue(1000 + r.capsule), 55, 58);
+      const hgt = r.fault ? 4 * dpr : Math.max(1, scaleY(r.fuel) / Math.max(1, t.runs.length) * 1.6);
+      bctx.fillStyle = r.fault ? "#ff3b3b" : `rgb(${cr * 255 | 0},${cg * 255 | 0},${cb * 255 | 0})`;
+      bctx.fillRect(x, y - hgt, Math.max(1, cw - 1), hgt);
+      y -= hgt;
+      if (y < top) break;
+    }
+    if (t.inputs) {
+      bctx.fillStyle = t.rejected ? "#f0b54a" : "#ffffff";
+      bctx.fillRect(x, top, Math.max(1, cw - 1), 3 * dpr);
+    }
+  });
+}
+
+function capsuleRow(id, c) {
+  const run = world.runs[id];
+  const last = !run ? "" : run.fault ? `<span class="fault">${esc(describeFault(run.fault))}</span>` : `${run.fuel_used} fuel`;
+  return `<td>${id}</td><td>${esc(actorName(c.installer))}</td><td class="${c.status}">${c.status}</td><td>${last}</td>`;
+}
+
+function sparkline(values) {
+  const w = 160, h = 28, max = Math.max(1, ...values.filter((v) => v >= 0));
+  const pts = values.map((v, i) => `${(i / Math.max(1, values.length - 1)) * w},${h - (v < 0 ? 0 : v / max * (h - 2))}`).join(" ");
+  const faults = values.map((v, i) => v < 0 ? `<rect x="${(i / Math.max(1, values.length - 1)) * w - 1}" y="0" width="2" height="${h}" fill="#ff6b6b"/>` : "").join("");
+  return `<svg width="${w}" height="${h}" style="vertical-align:middle">${faults}<polyline fill="none" stroke="#5fd38d" stroke-width="1.5" points="${pts}"/></svg>`;
+}
+
+function renderInspector() {
+  const box = $("inspect");
+  if (!selected) {
+    box.innerHTML = `<span class="hint">Click a capsule (on the ring) or an entity to see who controls it and the code behind it.</span>`;
+    sourceShown = null;
+    return;
+  }
+  if (selected.kind === "capsule") {
+    const c = world.capsules[selected.id];
+    if (!c) { box.textContent = `Capsule ${selected.id} was uninstalled.`; return; }
+    const run = world.runs[selected.id];
+    const caps = c.clist.map((slot, h) => slot ? `<tr><td>${h}</td><td><a class="link" data-entity="${slot.entity}">entity ${slot.entity}</a></td><td>${h === 0 ? "own" : slot.write ? "write" : "read"}</td><td>${h === 0 ? "" : `<button data-revoke="${h}">revoke</button>`}</td></tr>` : `<tr class="dim"><td>${h}</td><td colspan="3">revoked</td></tr>`).join("");
+    box.innerHTML = `
+      <div>capsule <b>${selected.id}</b> · <span class="${c.status}">${c.status}</span> · installed by ${esc(actorName(c.installer))}</div>
+      <div class="dim">code ${c.wasm.slice(0, 16)}… · faults in a row: ${c.consecutive_faults} · budget ${c.budget.fuel_per_tick} fuel/tick</div>
+      <div>fuel per tick ${sparkline(fuelHistory[selected.id] || [])} ${run ? (run.fault ? `<span class="fault">${esc(describeFault(run.fault))}</span>` : run.fuel_used) : ""}</div>
+      <h2 style="margin-top:10px">Capabilities</h2>
+      <table>${caps}</table>
+      <div class="row"><input id="grantin" placeholder="grant, e.g. 4:w"><button id="grantbtn">grant</button></div>
+      <div class="row">${c.status === "suspended" ? '<button id="resumebtn">resume</button>' : ""}<button id="uninstallbtn">uninstall</button><button id="editbtn">edit code</button></div>
+      <h2 style="margin-top:10px">Code running this tick</h2>
+      <pre id="code">loading…</pre>`;
+    box.querySelectorAll("[data-entity]").forEach((a) => a.onclick = () => { selected = { kind: "entity", id: Number(a.dataset.entity) }; renderPanels(); });
+    box.querySelectorAll("[data-revoke]").forEach((b) => b.onclick = () => act({ op: "revoke", capsule: selected.id, handle: Number(b.dataset.revoke) }));
+    $("grantbtn").onclick = guard(() => {
+      const [id, mode] = $("grantin").value.trim().split(":");
+      if (!/^\d+$/.test(id) || !["r", "w"].includes(mode)) throw new Error("use entity:r or entity:w");
+      act({ op: "grant", capsule: selected.id, grant: { entity: Number(id), write: mode === "w" } });
+    });
+    if ($("resumebtn")) $("resumebtn").onclick = () => act({ op: "resume", capsule: selected.id });
+    $("uninstallbtn").onclick = () => act({ op: "uninstall", capsule: selected.id });
+    $("editbtn").onclick = () => { $("source").value = $("code").textContent; $("source").focus(); };
+    if (sourceShown && sourceShown.hash === c.wasm) {
+      $("code").textContent = sourceShown.text;
+    } else {
+      const hash = c.wasm;
+      fetch(`/blob/${hash}`).then((r) => r.ok ? r.text() : Promise.reject(new Error(r.statusText))).then((text) => {
+        sourceShown = { hash, text };
+        if ($("code")) $("code").textContent = text;
+      }).catch((err) => { if ($("code")) $("code").textContent = "source unavailable: " + err.message; });
+    }
+    return;
+  }
+  const e = world.entities.get(selected.id);
+  if (!e) { box.textContent = `Entity ${selected.id} no longer exists.`; return; }
+  const ownerLink = e.owner.capsule !== undefined ? `<a class="link" data-capsule="${e.owner.capsule}">capsule ${e.owner.capsule}</a> (code)` : esc(ownerName(e.owner));
+  const holders = Object.entries(world.capsules).flatMap(([cid, c]) => c.clist.map((s, h) => s && s.entity === selected.id && h > 0 ? `<a class="link" data-capsule="${cid}">capsule ${cid}</a> ${s.write ? "writes" : "reads"}` : null).filter(Boolean));
+  const comps = Object.entries(e.components).map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(show(v))}</td></tr>`).join("");
+  box.innerHTML = `
+    <div>entity <b>${selected.id}</b>, owned by ${ownerLink}</div>
+    ${holders.length ? `<div class="dim">also reachable by: ${holders.join(", ")}</div>` : ""}
+    <table style="margin-top:6px">${comps}</table>
+    <div class="row"><input id="key" placeholder="key"><input id="value" placeholder='value: 1.5, "red", true'></div>
+    <div class="row"><button id="setbtn">set</button><button id="removebtn">remove key</button><button id="despawnbtn">despawn</button></div>`;
+  box.querySelectorAll("[data-capsule]").forEach((a) => a.onclick = () => { selected = { kind: "capsule", id: Number(a.dataset.capsule) }; renderPanels(); });
+  $("setbtn").onclick = guard(() => act({ op: "set", entity: selected.id, key: $("key").value, value: toValue($("value").value) }));
+  $("removebtn").onclick = guard(() => act({ op: "remove", entity: selected.id, key: $("key").value }));
+  $("despawnbtn").onclick = () => act({ op: "despawn", entity: selected.id });
+}
+
+let inspectorKey = "";
+function renderPanels() {
+  $("tick").textContent = world.tick;
+  $("count").textContent = world.entities.size;
+  const ids = capsuleIds();
+  $("ncaps").textContent = ids.length;
+
+  const caps = $("capsules");
+  caps.innerHTML = "<tr><th>id</th><th>by</th><th>status</th><th>last run</th></tr>";
+  for (const id of ids) {
+    const tr = document.createElement("tr");
+    tr.className = "click" + (selected && selected.kind === "capsule" && selected.id === id ? " sel" : "");
+    tr.innerHTML = capsuleRow(id, world.capsules[id]);
+    tr.onclick = () => { selected = { kind: "capsule", id }; renderPanels(); };
+    caps.appendChild(tr);
+  }
+
+  const list = $("entities");
+  list.innerHTML = "<tr><th>id</th><th>owner</th><th>components</th></tr>";
+  let shown = 0;
+  for (const [id, e] of world.entities) {
+    if (shown++ > 200) break;
+    const tr = document.createElement("tr");
+    tr.className = "click" + (selected && selected.kind === "entity" && selected.id === id ? " sel" : "");
+    tr.innerHTML = `<td>${id}</td><td>${esc(ownerName(e.owner))}</td><td></td>`;
+    tr.lastChild.textContent = Object.entries(e.components).map(([k, v]) => `${k}=${show(v)}`).join(" ");
+    tr.onclick = () => { selected = { kind: "entity", id }; renderPanels(); };
+    list.appendChild(tr);
+  }
+
+  const active = document.activeElement;
+  const editing = active && $("inspect").contains(active) && active.tagName === "INPUT";
+  const key = JSON.stringify([selected, selected && (selected.kind === "capsule" ? world.capsules[selected.id] : world.entities.get(selected.id))]);
+  if (!editing && key !== inspectorKey) { inspectorKey = key; renderInspector(); }
+  else if (selected && selected.kind === "capsule" && !editing) {
+    const run = world.runs[selected.id];
+    const spark = $("inspect").querySelector("svg");
+    if (spark) spark.outerHTML = sparkline(fuelHistory[selected.id] || []);
+  }
+}
+
+function guard(fn) { return () => { try { fn(); } catch (err) { event(err.message, "bad"); } }; }
+
+fetch("/capsules").then((r) => r.json()).then((examples) => {
+  const sel = $("example");
+  for (const name of Object.keys(examples)) {
+    const o = document.createElement("option"); o.value = name; o.textContent = name; sel.appendChild(o);
+  }
+  sel.onchange = () => { $("source").value = examples[sel.value]; };
+  sel.value = "helix"; sel.onchange();
+});
+
+$("install").onclick = async () => {
+  try {
+    const grants = $("grants").value.trim().split(/\s+/).filter(Boolean).map((g) => {
+      const [id, mode] = g.split(":");
+      if (!/^\d+$/.test(id) || !["r", "w"].includes(mode)) throw new Error(`bad grant "${g}", use id:r or id:w`);
+      return { entity: Number(id), write: mode === "w" };
+    });
+    const wasm = await upload($("source").value);
+    act({ op: "install", wasm, grants, budget: world.law.ceiling });
+  } catch (err) { event(err.message, "bad"); }
+};
+$("upgrade").onclick = async () => {
+  try {
+    if (!selected || selected.kind !== "capsule") throw new Error("select a capsule to upgrade");
+    const wasm = await upload($("source").value);
+    act({ op: "upgrade", capsule: selected.id, wasm });
+  } catch (err) { event(err.message, "bad"); }
+};
+$("realize").onclick = () => {
+  const text = $("intent").value.trim();
+  if (!text) return;
+  $("harness").innerHTML = "";
+  harnessLine(`<span class="dim">intent:</span> ${esc(text)}`);
+  $("realize").disabled = true;
+  send({ type: "intent", text });
+};
+$("spawn").onclick = guard(() => {
+  const raw = JSON.parse($("components").value);
+  const components = {};
+  for (const [k, v] of Object.entries(raw)) components[k] = toValue(JSON.stringify(v));
+  act({ op: "spawn", components });
+});
+$("setlaw").onclick = guard(() => act({ op: "set_law", law: JSON.parse($("law").value) }));
+
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>

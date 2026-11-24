@@ -1,0 +1,285 @@
+use std::collections::VecDeque;
+use std::sync::Mutex;
+
+use aether_harness::{
+    Bench, Event, HarnessError, Message, Model, ToolCall, ToolSpec, Turn, parse_response, realize,
+    request_body,
+};
+use aether_kernel::{Actor, BlobHash, Input, InputOutcome, Kernel, Law};
+use aether_world::{Owner, PlayerId, Value};
+use serde_json::{Value as Json, json};
+
+const HELIX: &str = include_str!("../../../capsules/helix.wat");
+const THIEF: &str = include_str!("../../../capsules/thief.wat");
+
+struct KernelBench(Mutex<Kernel>);
+
+impl Bench for KernelBench {
+    async fn read<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&Kernel) -> T + Send + 'static,
+    ) -> Result<T, HarnessError> {
+        Ok(f(&self.0.lock().unwrap()))
+    }
+
+    async fn upload(&self, bytes: Vec<u8>) -> Result<BlobHash, HarnessError> {
+        Ok(self.0.lock().unwrap().add_blob(bytes))
+    }
+
+    async fn act(&self, input: Input) -> Result<InputOutcome, HarnessError> {
+        Ok(self.0.lock().unwrap().step(vec![input]).inputs[0].clone())
+    }
+}
+
+struct Scripted {
+    turns: Mutex<VecDeque<Turn>>,
+    seen: Mutex<Vec<Vec<Message>>>,
+}
+
+impl Scripted {
+    fn new(turns: Vec<Turn>) -> Scripted {
+        Scripted {
+            turns: Mutex::new(turns.into()),
+            seen: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl Model for Scripted {
+    fn name(&self) -> &str {
+        "scripted"
+    }
+
+    async fn turn(
+        &self,
+        system: &str,
+        tools: &[ToolSpec],
+        messages: &[Message],
+    ) -> Result<Turn, HarnessError> {
+        assert!(system.contains("find"), "the guide documents the ABI");
+        assert_eq!(tools.len(), 5);
+        self.seen.lock().unwrap().push(messages.to_vec());
+        Ok(self
+            .turns
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("script has a turn"))
+    }
+}
+
+fn call(id: &str, name: &str, input: Json) -> Turn {
+    Turn {
+        assistant: json!({"role": "assistant", "content": [{"type": "tool_use", "id": id, "name": name, "input": input}]}),
+        text: String::new(),
+        calls: vec![ToolCall {
+            id: id.into(),
+            name: name.into(),
+            input,
+        }],
+    }
+}
+
+fn say(text: &str) -> Turn {
+    Turn {
+        assistant: json!({"role": "assistant", "content": [{"type": "text", "text": text}]}),
+        text: text.into(),
+        calls: Vec::new(),
+    }
+}
+
+#[tokio::test]
+async fn untested_or_failing_code_never_reaches_the_real_world() {
+    let bench = KernelBench(Mutex::new(Kernel::new(Law::default(), 1)));
+    let ana = Actor::Player(PlayerId("ana".into()));
+    let model = Scripted::new(vec![
+        call(
+            "1",
+            "trial",
+            json!({"wat": THIEF, "capsule": -1, "grants": [], "ticks": 5}),
+        ),
+        call("2", "install", json!({"wat": THIEF, "grants": []})),
+        call("3", "install", json!({"wat": HELIX, "grants": []})),
+        call(
+            "4",
+            "trial",
+            json!({"wat": HELIX, "capsule": -1, "grants": [], "ticks": 20}),
+        ),
+        call("5", "install", json!({"wat": HELIX, "grants": []})),
+        call("6", "look", json!({"key": "pos.z", "owner": ""})),
+        say("Done: capsule 0 spins a helix."),
+    ]);
+    let mut events = Vec::new();
+    let outcome = realize(&model, &bench, ana.clone(), "make a helix", |e| {
+        events.push(e)
+    })
+    .await
+    .unwrap();
+
+    let seen = model.seen.lock().unwrap();
+    let results: Vec<(String, bool)> = seen
+        .iter()
+        .filter_map(|msgs| match msgs.last() {
+            Some(Message::ToolResults(r)) => Some((r[0].content.clone(), r[0].is_error)),
+            _ => None,
+        })
+        .collect();
+    drop(seen);
+    assert!(
+        results[0].1 && results[0].0.contains("denied"),
+        "{}",
+        results[0].0
+    );
+    assert!(
+        results[1].1 && results[1].0.contains("has not passed"),
+        "{}",
+        results[1].0
+    );
+    assert!(results[2].1, "helix was not trialled yet");
+    assert!(
+        !results[3].1 && results[3].0.contains("moved"),
+        "{}",
+        results[3].0
+    );
+    assert!(
+        !results[4].1 && results[4].0.contains("capsule 0"),
+        "{}",
+        results[4].0
+    );
+    assert!(results[5].0.contains("8 matching"), "{}", results[5].0);
+
+    assert_eq!(outcome.capsules, vec![0]);
+    assert_eq!(outcome.turns, 7);
+    let k = bench.0.lock().unwrap();
+    assert_eq!(k.state().capsules.len(), 1);
+    assert_eq!(k.state().capsules.values().next().unwrap().installer, ana);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::ToolDone { name, ok: true, .. } if name == "install"))
+    );
+
+    let first = &model.seen.lock().unwrap()[0];
+    match &first[0] {
+        Message::User(text) => {
+            assert!(text.contains("You act for player:ana"));
+            assert!(text.contains("make a helix"));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn upgrades_are_trialled_against_the_capsule_they_replace() {
+    let mut k = Kernel::new(Law::default(), 1);
+    let wasm = k.add_blob(HELIX.as_bytes().to_vec());
+    k.step(vec![Input {
+        actor: Actor::Admin,
+        action: aether_kernel::Action::Install {
+            wasm,
+            grants: vec![],
+            budget: Law::default().ceiling,
+        },
+    }]);
+    let bench = KernelBench(Mutex::new(k));
+    let faster = HELIX.replace("(f64.const 0.03)", "(f64.const 0.09)");
+    let model = Scripted::new(vec![
+        call("1", "read_capsule", json!({"capsule": 0})),
+        call("2", "upgrade", json!({"capsule": 0, "wat": faster})),
+        call(
+            "3",
+            "trial",
+            json!({"wat": faster, "capsule": 0, "grants": [], "ticks": 10}),
+        ),
+        call("4", "upgrade", json!({"capsule": 0, "wat": faster})),
+        say("Faster now."),
+    ]);
+    realize(&model, &bench, Actor::Admin, "make it climb faster", |_| {})
+        .await
+        .unwrap();
+    let seen = model.seen.lock().unwrap();
+    let result = |i: usize| match seen[i].last() {
+        Some(Message::ToolResults(r)) => (r[0].content.clone(), r[0].is_error),
+        _ => panic!(),
+    };
+    assert!(result(1).0.contains("handle 8: entity"), "{}", result(1).0);
+    assert!(result(2).1);
+    assert!(
+        !result(3).1 && result(3).0.contains("Upgraded capsule 0"),
+        "{}",
+        result(3).0
+    );
+    assert!(!result(4).1, "{}", result(4).0);
+    drop(seen);
+    let k = bench.0.lock().unwrap();
+    let z_step = k
+        .world()
+        .entities()
+        .filter(|(_, e)| e.owner == Owner::Capsule(aether_world::CapsuleId(0)))
+        .filter_map(|(_, e)| match e.components.get("pos.z") {
+            Some(Value::Num(z)) => Some(*z),
+            _ => None,
+        })
+        .count();
+    assert_eq!(z_step, 8);
+}
+
+#[test]
+fn requests_follow_the_messages_api() {
+    let tools = vec![ToolSpec {
+        name: "look",
+        description: "d",
+        schema: json!({"type": "object"}),
+    }];
+    let messages = vec![
+        Message::User("hi".into()),
+        Message::Assistant(
+            json!({"role": "assistant", "content": [{"type": "thinking", "thinking": "", "signature": "s"}, {"type": "tool_use", "id": "t1", "name": "look", "input": {}}]}),
+        ),
+        Message::ToolResults(vec![aether_harness::ToolResult {
+            id: "t1".into(),
+            content: "ok".into(),
+            is_error: false,
+        }]),
+    ];
+    let haiku = request_body("claude-haiku-5-5", "medium", "guide", &tools, &messages);
+    assert_eq!(haiku["model"], "claude-haiku-5-5");
+    assert_eq!(haiku["output_config"]["effort"], "medium");
+    assert!(
+        haiku.get("fallbacks").is_none(),
+        "Haiku has no server-side fallback"
+    );
+    assert_eq!(haiku["tools"][0]["strict"], true);
+    assert_eq!(haiku["system"][0]["cache_control"]["type"], "ephemeral");
+    assert_eq!(
+        haiku["messages"][1]["content"][0]["type"], "thinking",
+        "thinking is passed back unchanged"
+    );
+    assert_eq!(haiku["messages"][2]["content"][0]["type"], "tool_result");
+    assert_eq!(haiku["messages"][2]["content"][0]["tool_use_id"], "t1");
+    let opus = request_body("claude-opus-5-5", "high", "guide", &tools, &messages);
+    assert_eq!(opus["fallbacks"], "default");
+}
+
+#[test]
+fn responses_are_parsed_with_their_stop_reasons() {
+    let ok = json!({
+        "stop_reason": "tool_use",
+        "content": [
+            {"type": "thinking", "thinking": "", "signature": "x"},
+            {"type": "text", "text": "Testing it."},
+            {"type": "tool_use", "id": "toolu_1", "name": "trial", "input": {"ticks": 3}}
+        ]
+    });
+    let turn = parse_response(&ok).unwrap();
+    assert_eq!(turn.text, "Testing it.");
+    assert_eq!(turn.calls[0].name, "trial");
+    assert_eq!(turn.calls[0].input["ticks"], 3);
+    assert_eq!(turn.assistant["content"][0]["type"], "thinking");
+
+    let refused =
+        json!({"stop_reason": "refusal", "stop_details": {"category": "cyber"}, "content": []});
+    assert!(matches!(parse_response(&refused), Err(HarnessError::Refused(c)) if c == "cyber"));
+    let cut = json!({"stop_reason": "max_tokens", "content": []});
+    assert!(matches!(parse_response(&cut), Err(HarnessError::Truncated)));
+}

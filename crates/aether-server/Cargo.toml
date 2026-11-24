@@ -1,0 +1,16 @@
+[package]
+name = "aether-server"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+dotenvy = "0.15.7"
+axum = { version = "0.8.9", features = ["ws"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "sync"] }
+aether-harness = { version = "0.1.0", path = "../aether-harness" }
+aether-kernel = { version = "0.1.0", path = "../aether-kernel" }
+aether-store = { version = "0.1.0", path = "../aether-store" }
+aether-world = { version = "0.1.0", path = "../aether-world" }

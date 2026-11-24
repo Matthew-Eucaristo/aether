@@ -1,0 +1,161 @@
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use aether_kernel::{Action, Actor, BlobHash, Input, Kernel, Law};
+use aether_store::Store;
+use aether_world::Value;
+
+const BOUNCE: &str = include_str!("../../../capsules/bounce.wat");
+const SCAN: &str = r#"(module
+  (import "world" "find" (func $find (param i32 i32 i64) (result i64)))
+  (import "world" "get_num" (func $get (param i64 i32 i32) (result f64)))
+  (import "world" "set_num" (func $set (param i32 i32 i32 f64)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "hp")
+  (data (i32.const 8) "total")
+  (func (export "tick") (local $id i64) (local $sum f64)
+    (local.set $id (i64.const -1))
+    (block $done
+      (loop $next
+        (local.set $id (call $find (i32.const 0) (i32.const 2) (local.get $id)))
+        (br_if $done (i64.lt_s (local.get $id) (i64.const 0)))
+        (local.set $sum (f64.add (local.get $sum) (call $get (local.get $id) (i32.const 0) (i32.const 2))))
+        (br $next)))
+    (call $set (i32.const 0) (i32.const 8) (i32.const 5) (local.get $sum))))"#;
+
+fn law() -> Law {
+    Law {
+        max_entities: 100_000,
+        max_inputs_per_actor: 100_000,
+        ..Law::default()
+    }
+}
+
+fn spawn(n: usize) -> Vec<Input> {
+    (0..n)
+        .map(|i| Input {
+            actor: Actor::Admin,
+            action: Action::Spawn {
+                components: BTreeMap::from([
+                    ("hp".to_owned(), Value::Num(i as f64)),
+                    ("pos.x".to_owned(), Value::Num(0.0)),
+                ]),
+            },
+        })
+        .collect()
+}
+
+fn install(wasm: BlobHash, n: usize) -> Vec<Input> {
+    (0..n)
+        .map(|_| Input {
+            actor: Actor::Admin,
+            action: Action::Install {
+                wasm,
+                grants: Vec::new(),
+                budget: Law::default().ceiling,
+            },
+        })
+        .collect()
+}
+
+fn per_tick(mut tick: impl FnMut(), ticks: u32) -> Duration {
+    tick();
+    let start = Instant::now();
+    for _ in 0..ticks {
+        tick();
+    }
+    start.elapsed() / ticks
+}
+
+fn row(name: &str, d: Duration, note: String) {
+    println!("{name:<44} {:>10.3} ms   {note}", d.as_secs_f64() * 1e3);
+}
+
+fn main() {
+    println!("{:<44} {:>13}", "scenario", "per tick");
+    for entities in [1_000, 10_000, 50_000] {
+        let mut k = Kernel::new(law(), 1);
+        k.step(spawn(entities));
+        row(
+            &format!("idle region, {entities} entities"),
+            per_tick(|| drop(k.step(Vec::new())), 50),
+            String::new(),
+        );
+        let start = Instant::now();
+        let report = k.step(
+            (0..entities as u64)
+                .map(|i| Input {
+                    actor: Actor::Admin,
+                    action: Action::Set {
+                        entity: aether_world::EntityId(i),
+                        key: "pos.x".into(),
+                        value: Value::Num(1.0),
+                    },
+                })
+                .collect(),
+        );
+        row(
+            &format!("one tick writing all {entities} entities"),
+            start.elapsed(),
+            format!("{} touched", report.touched.len()),
+        );
+    }
+
+    for capsules in [16, 64, 256] {
+        let mut k = Kernel::new(law(), 1);
+        let wasm = k.add_blob(BOUNCE.as_bytes().to_vec());
+        k.step(spawn(10_000));
+        k.step(install(wasm, capsules));
+        row(
+            &format!("{capsules} bounce capsules, 10000 entities"),
+            per_tick(|| drop(k.step(Vec::new())), 20),
+            String::new(),
+        );
+    }
+
+    for entities in [1_000, 10_000] {
+        let mut k = Kernel::new(law(), 1);
+        let wasm = k.add_blob(SCAN.as_bytes().to_vec());
+        k.step(spawn(entities));
+        k.step(install(wasm, 1));
+        let mut fuel = 0;
+        let d = per_tick(
+            || {
+                let r = k.step(Vec::new());
+                fuel = r.runs[0].fuel_used;
+                assert!(r.runs[0].fault.is_none(), "{:?}", r.runs[0].fault);
+            },
+            20,
+        );
+        row(
+            &format!("one capsule summing hp over {entities}"),
+            d,
+            format!("{fuel} fuel"),
+        );
+    }
+
+    let dir = std::env::temp_dir().join(format!("aether-bench-{}", std::process::id()));
+    let mut store = Store::create(PathBuf::from(&dir), law(), 1).expect("store");
+    store.step(spawn(10_000)).expect("spawn");
+    row(
+        "durable empty tick (journal fsync)",
+        per_tick(|| drop(store.step(Vec::new()).expect("step")), 50),
+        String::new(),
+    );
+    let start = Instant::now();
+    store.checkpoint().expect("checkpoint");
+    row(
+        "checkpoint with 10000 entities",
+        start.elapsed(),
+        format!(
+            "{} KiB snapshot",
+            std::fs::metadata(dir.join("snapshot.json")).map_or(0, |m| m.len() / 1024)
+        ),
+    );
+    let start = Instant::now();
+    drop(store);
+    Store::open(&dir).expect("reopen");
+    row("reopen with 10000 entities", start.elapsed(), String::new());
+    std::fs::remove_dir_all(&dir).expect("bench dir is removable");
+}

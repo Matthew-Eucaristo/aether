@@ -1,0 +1,14 @@
+[package]
+name = "aether-store"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
+thiserror = "2.0.21"
+aether-kernel = { version = "0.1.0", path = "../aether-kernel" }
+
+[dev-dependencies]
+aether-world = { version = "0.1.0", path = "../aether-world" }
