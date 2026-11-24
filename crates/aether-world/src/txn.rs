@@ -183,6 +183,16 @@ impl Txn {
         Ok(self.entity_mut(world, id)?.components.remove(key).is_some())
     }
 
+    pub fn transfer(
+        &mut self,
+        world: &World,
+        id: EntityId,
+        owner: Owner,
+    ) -> Result<(), WorldError> {
+        self.entity_mut(world, id)?.owner = owner;
+        Ok(())
+    }
+
     pub fn despawn(&mut self, world: &World, id: EntityId) -> Result<(), WorldError> {
         self.entity(world, id).ok_or(WorldError::NoSuchEntity(id))?;
         if world.entity(id).is_some() {

@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use aether_world::{
-    CapsuleId, Entity, EntityId, MAX_KEY_LEN, MAX_NUMS, MAX_TEXT_LEN, Owner, Txn, Value, World,
-    WorldError,
+    CapsuleId, Entity, EntityId, MAX_KEY_LEN, MAX_NUMS, MAX_TEXT_LEN, Owner, PlayerId, Txn, Value,
+    World, WorldError,
 };
 use wasmtime::{Caller, Engine, Error, Linker, StoreLimits, Trap};
 
@@ -39,6 +39,8 @@ pub(crate) struct HostState {
     pub limits: StoreLimits,
     pub terrain: crate::terrain::Terrain,
     pub near: Option<(Near, Vec<EntityId>)>,
+    pub pledges: Arc<Vec<crate::pledge::Pledge>>,
+    pub settled: Vec<(crate::pledge::Stake, Option<PlayerId>)>,
 }
 
 #[derive(PartialEq)]
@@ -73,6 +75,8 @@ impl Default for HostState {
             limits: wasmtime::StoreLimitsBuilder::new().build(),
             terrain: crate::terrain::Terrain::default(),
             near: None,
+            pledges: Arc::new(Vec::new()),
+            settled: Vec::new(),
         }
     }
 }
@@ -105,6 +109,8 @@ pub enum HostError {
     BadUtf8,
     #[error("guest string is too long")]
     TooLong,
+    #[error("entity {0} is pledged to a covenant")]
+    Pledged(u64),
     #[error(transparent)]
     World(#[from] WorldError),
 }
@@ -219,6 +225,9 @@ fn writable(state: &mut HostState, handle: i32) -> Result<Cap, HostError> {
     let cap = cap(state, handle)?;
     if !cap.write {
         return Err(HostError::NoWrite(handle));
+    }
+    if crate::pledge::of(&state.pledges, crate::pledge::Stake::Entity(cap.entity)).is_some() {
+        return Err(HostError::Pledged(cap.entity.0));
     }
     state.writes_left = state
         .writes_left
@@ -526,6 +535,35 @@ pub(crate) fn linker(engine: &Engine) -> wasmtime::Result<Linker<HostState>> {
 
     l.func_wrap(
         "world",
+        "award",
+        |mut c: Caller<'_, HostState>,
+         kind: i32,
+         id: i64,
+         tp: i32,
+         tl: i32|
+         -> wasmtime::Result<i32> {
+            charge(&mut c, COST_WRITE)?;
+            let to = deny(read_str(&mut c, tp, tl, MAX_TEXT_LEN))?;
+            Ok(award(c.data_mut(), kind, id, &to).map_or(-1, |()| 0))
+        },
+    )?;
+
+    l.func_wrap(
+        "world",
+        "release",
+        |mut c: Caller<'_, HostState>, kind: i32, id: i64| -> wasmtime::Result<i32> {
+            charge(&mut c, COST_WRITE)?;
+            let s = c.data_mut();
+            let Some(stake) = mine(s, kind, id) else {
+                return Ok(-1);
+            };
+            s.settled.push((stake, None));
+            Ok(0)
+        },
+    )?;
+
+    l.func_wrap(
+        "world",
         "ground",
         |mut c: Caller<'_, HostState>, x: f64, y: f64| -> wasmtime::Result<f64> {
             charge(&mut c, COST_GROUND)?;
@@ -711,6 +749,31 @@ fn spawn(s: &mut HostState) -> Result<i32, HostError> {
     };
     let handle = claim_slot(&mut s.clist, cap, s.max_clist_len).ok_or(HostError::ClistFull)?;
     i32::try_from(handle).map_err(|_| HostError::ClistFull)
+}
+
+fn mine(s: &HostState, kind: i32, id: i64) -> Option<crate::pledge::Stake> {
+    let stake = crate::pledge::stake(kind, id)?;
+    let pledge = crate::pledge::of(&s.pledges, stake)?;
+    let open = pledge.covenant == s.capsule && !s.settled.iter().any(|(st, _)| *st == stake);
+    open.then_some(stake)
+}
+
+fn award(s: &mut HostState, kind: i32, id: i64, to: &str) -> Option<()> {
+    let stake = mine(s, kind, id)?;
+    let winner = PlayerId(to.strip_prefix("player:")?.to_owned());
+    let party = s
+        .pledges
+        .iter()
+        .any(|p| p.covenant == s.capsule && p.from == winner);
+    if !party {
+        return None;
+    }
+    if let crate::pledge::Stake::Entity(e) = stake {
+        let HostState { txn, world, .. } = s;
+        txn.transfer(world, e, Owner::Player(winner.clone())).ok()?;
+    }
+    s.settled.push((stake, Some(winner)));
+    Some(())
 }
 
 fn despawn(s: &mut HostState, h: i32) -> Result<(), HostError> {

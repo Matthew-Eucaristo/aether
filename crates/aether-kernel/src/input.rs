@@ -78,6 +78,10 @@ pub enum Action {
     SetLaw {
         law: Law,
     },
+    Pledge {
+        covenant: CapsuleId,
+        stake: crate::pledge::Stake,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

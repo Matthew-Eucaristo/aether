@@ -102,6 +102,14 @@ Costs in fuel: get_nums and set_nums cost 1 per number on top of a read or write
 - Bodies land on the terrain, rest on and bounce off boxes (rotated about z by rot.z only) and solid spheres, and push each other with momentum conserved. Avatars and projectiles are not bodies.
 - To throw or launch something, spawn it with body = true and set vel.*; to stop simulating it, remove body. A body at rest costs no writes.
 
+# Covenants (games with binding stakes)
+
+- A covenant is a capsule whose code is the rules of a game or deal. People pledge stakes to it: an entity they own, or a whole capsule they installed (a house, a gun). From then on the stake is frozen: its owner cannot change, despawn, upgrade or uninstall it, and no capsule can write it, until the covenant gives it away or back. A covenant that holds other people's stakes cannot be upgraded or uninstalled by its own installer.
+- Each pledge reaches the covenant as a signal on its own entity, sent by the pledging person: pledge (value: entity id) or pledge_capsule (value: capsule id). Read signal_from for who pledged and keep your own record of stakes and players.
+- (func $award (param i32 i64 i32 i32) (result i32)) kind (0 entity, 1 capsule), id, text ptr, text len of "player:<name>" -> 0 when the stake now belongs to that person, -1 when not allowed. Only stakes pledged to this covenant can be awarded, and only to someone who pledged to it.
+- (func $release (param i32 i64) (result i32)) kind, id -> 0 when the stake goes back to whoever pledged it.
+- Awards and releases count only if the tick does not fault. If the covenant is suspended or uninstalled, every stake goes back. Always give a game a timeout that releases the stakes, so nobody's things stay locked when the other side never shows up. The wager example (in the code examples) is a complete covenant.
+
 # Patterns that work
 
 - Set up once, then update: on each tick check (call $kind (call $self) key) for a marker such as "init" or "first". When it is 0, spawn what you need and store the handles as numbers on handle 0. Every later tick, read the stored handle back with i32.trunc_f64_s and use (call $entity handle) to get the id for reading.

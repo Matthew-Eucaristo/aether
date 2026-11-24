@@ -26,11 +26,12 @@ const CHECKPOINT_EVERY: u64 = 600;
 const MAX_MESSAGE_BYTES: usize = 2 << 20;
 const QUEUE: usize = 4096;
 const INDEX: &str = include_str!("../web/index.html");
-const EXAMPLES: [(&str, &str); 15] = [
+const EXAMPLES: [(&str, &str); 16] = [
     ("house", include_str!("../../../capsules/house.wat")),
     ("realm", include_str!("../../../capsules/realm.wat")),
     ("rifle", include_str!("../../../capsules/rifle.wat")),
     ("launcher", include_str!("../../../capsules/launcher.wat")),
+    ("wager", include_str!("../../../capsules/wager.wat")),
     ("blackhole", include_str!("../../../capsules/blackhole.wat")),
     ("helix", include_str!("../../../capsules/helix.wat")),
     ("orbit", include_str!("../../../capsules/orbit.wat")),

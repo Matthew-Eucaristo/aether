@@ -5,7 +5,7 @@ use aether_kernel::{
 };
 use aether_world::{CapsuleId, EntityId, Owner, PlayerId, Usage, Value};
 
-const CAPSULES: [&str; 8] = [
+const CAPSULES: [&str; 9] = [
     include_str!("../../../capsules/bounce.wat"),
     include_str!("../../../capsules/dice.wat"),
     include_str!("../../../capsules/greedy.wat"),
@@ -14,6 +14,7 @@ const CAPSULES: [&str; 8] = [
     include_str!("../../../capsules/hog.wat"),
     include_str!("../../../capsules/rollback.wat"),
     include_str!("../../../capsules/deep.wat"),
+    include_str!("../../../capsules/wager.wat"),
 ];
 
 const KEYS: [&str; 10] = [
@@ -116,7 +117,7 @@ fn law(rng: &mut Rng) -> Law {
 
 fn input(rng: &mut Rng, k: &Kernel, wasm: &[BlobHash]) -> Input {
     let capsule = CapsuleId(rng.below(k.state().next_capsule + 2));
-    match rng.below(13) {
+    match rng.below(14) {
         0 | 1 => Input {
             actor: actor(rng),
             action: Action::Spawn {
@@ -186,6 +187,17 @@ fn input(rng: &mut Rng, k: &Kernel, wasm: &[BlobHash]) -> Input {
                 grant: Grant {
                     entity: entity(rng, k),
                     write: rng.chance(50),
+                },
+            },
+        },
+        13 => Input {
+            actor: actor(rng),
+            action: Action::Pledge {
+                covenant: capsule,
+                stake: if rng.chance(50) {
+                    aether_kernel::Stake::Entity(entity(rng, k))
+                } else {
+                    aether_kernel::Stake::Capsule(CapsuleId(rng.below(k.state().next_capsule + 2)))
                 },
             },
         },

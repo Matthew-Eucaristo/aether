@@ -7,6 +7,7 @@ mod kernel;
 mod law;
 mod meter;
 mod physics;
+mod pledge;
 mod runtime;
 mod signal;
 mod terrain;
@@ -19,5 +20,6 @@ pub use kernel::{
     CapsuleRun, Fault, GUARANTEED_FUEL, Journal, Kernel, KernelError, RULES, State, TickReport,
 };
 pub use law::Law;
+pub use pledge::{Pledge, Stake};
 pub use signal::{Sender, Signal};
 pub use terrain::{Terrain, height};

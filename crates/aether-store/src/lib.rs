@@ -166,6 +166,9 @@ fn upgrade_snapshot(json: &mut serde_json::Value, from: &str) -> Result<(), Stri
     state
         .entry("signals")
         .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    state
+        .entry("pledges")
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
     let law = state
         .get_mut("law")
         .and_then(|l| l.as_object_mut())

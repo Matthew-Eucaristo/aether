@@ -1109,11 +1109,23 @@ fn rules_fingerprint() {
             ],
         );
     }
-    spawn(
+    let anas = spawn(
         &mut k,
         player("ana"),
         &[("hp", Value::Num(7.0)), ("name", Value::Text("ana".into()))],
     );
+    let budis = spawn(&mut k, player("budi"), &[("hp", Value::Num(3.0))]);
+    let wager = install(&mut k, capsule!("wager"), vec![]);
+    for (who, stake) in [("ana", anas), ("budi", budis)] {
+        act(
+            &mut k,
+            player(who),
+            Action::Pledge {
+                covenant: wager,
+                stake: aether_kernel::Stake::Entity(stake),
+            },
+        );
+    }
     for name in [
         capsule!("bounce"),
         capsule!("orbit"),
@@ -1168,8 +1180,8 @@ fn rules_fingerprint() {
     assert_eq!(
         (RULES, fingerprint.as_str()),
         (
-            "aether-rules/14",
-            "2bc29787bdcdd2f641044cc452ec85bb23c418fd362dabed41c140180860b4a0"
+            "aether-rules/15",
+            "9784c74c5c59c2fd29d68ac2a8941865b0c0afb6b567cb425a860f403d1ff256"
         ),
         "the kernel's observable behaviour changed: if that is intended, bump RULES and update this fingerprint"
     );

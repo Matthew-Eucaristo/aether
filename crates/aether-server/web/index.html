@@ -137,7 +137,7 @@
 "use strict";
 const $ = (id) => document.getElementById(id);
 const TICK_MS = 100;
-const world = { entities: new Map(), capsules: {}, law: null, tick: 0, runs: {}, you: null };
+const world = { entities: new Map(), capsules: {}, pledges: [], law: null, tick: 0, runs: {}, you: null };
 const motion = new Map();
 const history = [];
 const fuelHistory = {};
@@ -327,6 +327,7 @@ function applyHello(msg, floats) {
   world.entities.clear(); motion.clear(); swarms.clear();
   for (const [id, e] of Object.entries(msg.state.world.entities)) setEntity(Number(id), decodeComponents(e, floats), now, true);
   world.capsules = msg.state.capsules;
+  world.pledges = msg.state.pledges || [];
   world.law = msg.state.law;
   world.tick = msg.state.world.tick;
   focusSent = null;
@@ -357,6 +358,7 @@ function applyTick(msg, floats) {
   for (const id of msg.left || []) setEntity(id, null, now, false);
   for (const [id, e] of Object.entries(msg.changed)) setEntity(Number(id), e && decodeComponents(e, floats), now, false);
   world.capsules = msg.capsules;
+  world.pledges = msg.pledges || [];
   if (JSON.stringify(world.law) !== JSON.stringify(msg.law)) {
     world.law = msg.law;
     $("law").value = JSON.stringify(world.law, null, 1);
@@ -2057,6 +2059,24 @@ function sparkline(values) {
   return `<svg width="${w}" height="${h}" style="vertical-align:middle">${faults}<polyline fill="none" stroke="#5fd38d" stroke-width="1.5" points="${pts}"/></svg>`;
 }
 
+function stakeName(s) { return s.entity !== undefined ? `entity ${s.entity}` : `capsule ${s.capsule}`; }
+function pledgeRows(stake) {
+  const held = world.pledges.filter((p) => stake.capsule !== undefined && p.covenant === stake.capsule);
+  const mine = world.pledges.find((p) => JSON.stringify(p.stake) === JSON.stringify(stake));
+  let html = "";
+  if (mine) html += `<div class="fault">pledged by ${esc(mine.from)} to covenant ${mine.covenant}: frozen until it is awarded or returned</div>`;
+  if (held.length) html += `<div>covenant holding ${held.map((p) => `${stakeName(p.stake)} from ${esc(p.from)}`).join(", ")}</div>`;
+  if (!mine && myName()) html += `<div class="row"><input id="pledgein" placeholder="covenant capsule id"><button id="pledgebtn">pledge as a stake</button></div>`;
+  return html;
+}
+function wirePledge(stake) {
+  if (!$("pledgebtn")) return;
+  $("pledgebtn").onclick = guard(() => {
+    const id = $("pledgein").value.trim();
+    if (!/^\d+$/.test(id)) throw new Error("type the covenant's capsule id");
+    act({ op: "pledge", covenant: Number(id), stake });
+  });
+}
 function renderInspector() {
   const box = $("inspect");
   if (!selected) {
@@ -2077,6 +2097,7 @@ function renderInspector() {
       <table>${caps}</table>
       <div class="row"><input id="grantin" placeholder="grant, e.g. 4:w"><button id="grantbtn">grant</button></div>
       <div class="row">${c.status === "suspended" ? '<button id="resumebtn">resume</button>' : ""}<button id="uninstallbtn">uninstall</button><button id="editbtn">edit code</button></div>
+      ${pledgeRows({ capsule: selected.id })}
       <h2 style="margin-top:10px">Code running this tick</h2>
       <pre id="code">loading…</pre>`;
     box.querySelectorAll("[data-entity]").forEach((a) => a.onclick = () => { selected = { kind: "entity", id: Number(a.dataset.entity) }; renderPanels(); });
@@ -2089,6 +2110,7 @@ function renderInspector() {
     if ($("resumebtn")) $("resumebtn").onclick = () => act({ op: "resume", capsule: selected.id });
     $("uninstallbtn").onclick = () => act({ op: "uninstall", capsule: selected.id });
     $("editbtn").onclick = () => { $("source").value = $("code").textContent; $("source").focus(); };
+    wirePledge({ capsule: selected.id });
     if (sourceShown && sourceShown.hash === c.wasm) {
       $("code").textContent = sourceShown.text;
     } else {
@@ -2112,7 +2134,9 @@ function renderInspector() {
     <div class="row"><input id="key" placeholder="key"><input id="value" placeholder='value: 1.5, "red", true'></div>
     <div class="row"><button id="setbtn">set</button><button id="removebtn">remove key</button><button id="despawnbtn">despawn</button></div>
     <div class="row"><button id="usebtn">use</button><input id="sigin" placeholder="signal, e.g. open:1"><button id="sigbtn">send</button></div>
+    ${pledgeRows({ entity: selected.id })}
     <div class="hint">Double-click it in the view to use it; click the view and type to send key signals.</div>`;
+  wirePledge({ entity: selected.id });
   box.querySelectorAll("[data-capsule]").forEach((a) => a.onclick = () => { selected = { kind: "capsule", id: Number(a.dataset.capsule) }; renderPanels(); });
   $("setbtn").onclick = guard(() => act({ op: "set", entity: selected.id, key: $("key").value, value: toValue($("value").value) }));
   $("removebtn").onclick = guard(() => act({ op: "remove", entity: selected.id, key: $("key").value }));

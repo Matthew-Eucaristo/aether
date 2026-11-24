@@ -179,6 +179,32 @@ impl Canon for BTreeMap<CapsuleId, Capsule> {
     }
 }
 
+impl Canon for Vec<crate::pledge::Pledge> {
+    fn feed(&self, h: &mut Hasher) {
+        (self.len() as u64).feed(h);
+        for crate::pledge::Pledge {
+            stake,
+            covenant,
+            from,
+        } in self
+        {
+            match stake {
+                crate::pledge::Stake::Entity(e) => {
+                    h.update(&[0]);
+                    e.0.feed(h);
+                }
+                crate::pledge::Stake::Capsule(c) => {
+                    h.update(&[1]);
+                    c.0.feed(h);
+                }
+            }
+            covenant.0.feed(h);
+            (from.0.len() as u64).feed(h);
+            h.update(from.0.as_bytes());
+        }
+    }
+}
+
 impl Canon for Vec<Signal> {
     fn feed(&self, h: &mut Hasher) {
         (self.len() as u64).feed(h);

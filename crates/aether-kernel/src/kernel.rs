@@ -12,11 +12,12 @@ use crate::host::{HostError, HostState, splitmix64};
 use crate::input::{Action, Actor, Input, InputOutcome};
 use crate::law::Law;
 use crate::meter::{DEPTH_EXPORT, DEPTH_LIMIT, Init, MEMORY_EXPORT, Reset};
+use crate::pledge::{self, Pledge, Stake};
 use crate::runtime::{Runtime, TABLE_ELEMENTS, THREAD_STACK};
 use crate::signal::{Sender, Signal};
 
 const LOG_BYTES_PER_TICK: usize = 1024;
-pub const RULES: &str = "aether-rules/14";
+pub const RULES: &str = "aether-rules/15";
 pub const GUARANTEED_FUEL: u64 = 250_000;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -27,6 +28,7 @@ pub struct State {
     pub next_capsule: u64,
     pub capsules: BTreeMap<CapsuleId, Capsule>,
     pub signals: Vec<Signal>,
+    pub pledges: Vec<Pledge>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -125,6 +127,7 @@ impl Kernel {
             next_capsule: 0,
             capsules: BTreeMap::new(),
             signals: Vec::new(),
+            pledges: Vec::new(),
         };
         Self::from_state(state, Blobs::new()).expect("an empty state is valid")
     }
@@ -208,6 +211,7 @@ impl Kernel {
             next_capsule,
             capsules,
             signals,
+            pledges,
         } = &self.state;
         let mut h = blake3::Hasher::new();
         h.update(b"aether-kernel/v2");
@@ -217,6 +221,7 @@ impl Kernel {
         next_capsule.feed(&mut h);
         capsules.feed(&mut h);
         signals.feed(&mut h);
+        pledges.feed(&mut h);
         BlobHash(*h.finalize().as_bytes())
     }
 
@@ -281,6 +286,7 @@ impl Kernel {
                 .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
         });
         crate::physics::step(&mut self.state.world, &self.state.law, &mut touched);
+        self.prune_pledges();
         self.journal.ticks.push(inputs);
         self.live.retain(|id, l| {
             self.state
@@ -390,7 +396,64 @@ impl Kernel {
         }
     }
 
+    fn frozen_entity(&self, actor: &Actor, entity: EntityId) -> Option<String> {
+        if *actor == Actor::Admin {
+            return None;
+        }
+        if let Some(p) = pledge::of(&self.state.pledges, Stake::Entity(entity)) {
+            return Some(format!(
+                "entity {} is pledged to covenant {}",
+                entity.0, p.covenant.0
+            ));
+        }
+        match self.state.world.entity(entity).map(|e| &e.owner) {
+            Some(Owner::Capsule(c)) => pledge::of(&self.state.pledges, Stake::Capsule(*c))
+                .map(|p| format!("capsule {} is pledged to covenant {}", c.0, p.covenant.0)),
+            _ => None,
+        }
+    }
+
+    fn frozen_capsule(&self, actor: &Actor, id: CapsuleId) -> Option<String> {
+        if *actor == Actor::Admin {
+            return None;
+        }
+        if let Some(p) = pledge::of(&self.state.pledges, Stake::Capsule(id)) {
+            return Some(format!(
+                "capsule {} is pledged to covenant {}",
+                id.0, p.covenant.0
+            ));
+        }
+        let holds_others = self
+            .state
+            .pledges
+            .iter()
+            .any(|p| p.covenant == id && Actor::Player(p.from.clone()) != *actor);
+        holds_others.then(|| format!("covenant {} holds other players' pledges", id.0))
+    }
+
+    fn prune_pledges(&mut self) {
+        let State {
+            world,
+            capsules,
+            pledges,
+            ..
+        } = &mut self.state;
+        pledges.retain(|p| {
+            let covenant = capsules
+                .get(&p.covenant)
+                .is_some_and(|c| c.status == Status::Active);
+            let stake = match p.stake {
+                Stake::Entity(e) => world.entity(e).is_some(),
+                Stake::Capsule(c) => capsules.contains_key(&c),
+            };
+            covenant && stake
+        });
+    }
+
     fn authorize(&self, actor: &Actor, entity: EntityId) -> Result<(), String> {
+        if let Some(why) = self.frozen_entity(actor, entity) {
+            return Err(why);
+        }
         let e = self
             .state
             .world
@@ -404,6 +467,9 @@ impl Kernel {
     }
 
     fn authorize_capsule(&self, actor: &Actor, id: CapsuleId) -> Result<(), String> {
+        if let Some(why) = self.frozen_capsule(actor, id) {
+            return Err(why);
+        }
         let capsule = self
             .state
             .capsules
@@ -623,6 +689,63 @@ impl Kernel {
                 c.consecutive_faults = 0;
                 Ok(InputOutcome::Applied)
             }
+            Action::Pledge { covenant, stake } => {
+                let Actor::Player(player) = actor else {
+                    return Err("only players pledge stakes".into());
+                };
+                let c = self
+                    .state
+                    .capsules
+                    .get(covenant)
+                    .filter(|c| c.status == Status::Active)
+                    .ok_or_else(|| format!("covenant {} is not an active capsule", covenant.0))?;
+                let target = c.self_entity;
+                if pledge::of(&self.state.pledges, *stake).is_some() {
+                    return Err("that stake is already pledged".into());
+                }
+                let name = match stake {
+                    Stake::Entity(e) => {
+                        let owner = &world
+                            .entity(*e)
+                            .ok_or_else(|| format!("entity {} does not exist", e.0))?
+                            .owner;
+                        if *owner != Owner::Player(player.clone()) {
+                            return Err(format!("{} does not own entity {}", player.0, e.0));
+                        }
+                        ("pledge", e.0)
+                    }
+                    Stake::Capsule(id) => {
+                        if id == covenant {
+                            return Err("a covenant cannot be its own stake".into());
+                        }
+                        let staked = self
+                            .state
+                            .capsules
+                            .get(id)
+                            .ok_or_else(|| format!("capsule {} does not exist", id.0))?;
+                        if staked.installer != *actor {
+                            return Err(format!("{} did not install capsule {}", player.0, id.0));
+                        }
+                        ("pledge_capsule", id.0)
+                    }
+                };
+                let at = self.state.pledges.partition_point(|p| p.stake < *stake);
+                self.state.pledges.insert(
+                    at,
+                    Pledge {
+                        stake: *stake,
+                        covenant: *covenant,
+                        from: player.clone(),
+                    },
+                );
+                self.delivering.push(Signal {
+                    from: Sender::Actor(actor.clone()),
+                    entity: target,
+                    name: name.0.into(),
+                    value: name.1 as f64,
+                });
+                Ok(InputOutcome::Applied)
+            }
             Action::SetLaw { law } => {
                 if *actor != Actor::Admin {
                     return Err("only the region admin may change the law".into());
@@ -682,6 +805,8 @@ impl Kernel {
                 .build(),
             terrain: law.terrain,
             near: None,
+            pledges: Arc::new(self.state.pledges.clone()),
+            settled: Vec::new(),
         };
         let cached = self.live.remove(&id).filter(|l| {
             l.wasm == capsule.wasm
@@ -783,6 +908,14 @@ impl Kernel {
                 record.clist = host.clist;
                 record.consecutive_faults = 0;
                 self.state.signals.extend(host.emitted);
+                for (stake, winner) in host.settled {
+                    self.state.pledges.retain(|p| p.stake != stake);
+                    if let (Stake::Capsule(c), Some(winner)) = (stake, winner)
+                        && let Some(staked) = self.state.capsules.get_mut(&c)
+                    {
+                        staked.installer = Actor::Player(winner);
+                    }
+                }
                 touched.extend(
                     self.state
                         .world

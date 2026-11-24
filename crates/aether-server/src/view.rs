@@ -123,6 +123,7 @@ struct Shared {
     capsules: String,
     law: String,
     head: String,
+    pledges: String,
 }
 
 impl Cache {
@@ -131,6 +132,7 @@ impl Cache {
             capsules: serde_json::to_string(&k.state().capsules).expect("capsules serialize"),
             law: serde_json::to_string(&k.state().law).expect("law serializes"),
             head: serde_json::to_string(&k.state_hash()).expect("hashes serialize"),
+            pledges: serde_json::to_string(&k.state().pledges).expect("pledges serialize"),
         })
     }
 
@@ -204,11 +206,12 @@ pub fn hello(k: &Kernel, viewer: &mut Viewer, cache: &mut Cache) -> Sent {
     let shared = cache.shared(k);
     let you = serde_json::to_string(&viewer.actor).expect("actors serialize");
     let text = format!(
-        "{{\"type\":\"hello\",\"you\":{you},\"head\":{},\"halfs\":{},\"state\":{{\"law\":{},\"capsules\":{},\"world\":{{\"tick\":{},\"entities\":{entities}}}}}}}",
+        "{{\"type\":\"hello\",\"you\":{you},\"head\":{},\"halfs\":{},\"state\":{{\"law\":{},\"capsules\":{},\"pledges\":{},\"world\":{{\"tick\":{},\"entities\":{entities}}}}}}}",
         shared.head,
         halfs.len(),
         shared.law,
         shared.capsules,
+        shared.pledges,
         k.world().tick(),
     );
     viewer.known = near;
@@ -272,10 +275,11 @@ pub fn tick(
     let (changed, halfs) = cache.entities(k, &ids);
     let shared = cache.shared(k);
     let text = format!(
-        "{{\"type\":\"tick\",\"report\":{},\"inputs\":{},\"capsules\":{},\"law\":{},\"halfs\":{},\"changed\":{changed},\"left\":{}}}",
+        "{{\"type\":\"tick\",\"report\":{},\"inputs\":{},\"capsules\":{},\"pledges\":{},\"law\":{},\"halfs\":{},\"changed\":{changed},\"left\":{}}}",
         text.report,
         text.inputs,
         shared.capsules,
+        shared.pledges,
         shared.law,
         halfs.len(),
         serde_json::to_string(&left).expect("ids serialize"),
