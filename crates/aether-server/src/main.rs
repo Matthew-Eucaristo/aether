@@ -482,7 +482,22 @@ async fn session(mut socket: WebSocket, actor: Actor, app: App) {
                 }
             }
             update = updates.recv() => {
-                let Ok(update) = update else { return };
+                let update = match update {
+                    Ok(update) => update,
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        let (reply, joined) = oneshot::channel();
+                        if app.requests.try_send(Request::Join { actor: actor.clone(), reply }).is_err() {
+                            return;
+                        }
+                        let Ok((hello, fresh)) = joined.await else { return };
+                        updates = fresh;
+                        if socket.send(Message::text(hello)).await.is_err() {
+                            return;
+                        }
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return,
+                };
                 if socket.send(Message::text(update.text.clone())).await.is_err() {
                     return;
                 }

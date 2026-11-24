@@ -151,12 +151,18 @@ const wsUrl = new URL("/ws", location.href);
 wsUrl.protocol = location.protocol === "https:" ? "wss:" : "ws:";
 if (params.get("token")) wsUrl.searchParams.set("token", params.get("token"));
 else wsUrl.searchParams.set("player", params.get("player") || "guest");
-const socket = new WebSocket(wsUrl);
-socket.binaryType = "arraybuffer";
+let socket = null;
+function connect() {
+  socket = new WebSocket(wsUrl);
+  socket.binaryType = "arraybuffer";
+  socket.onopen = onOpen;
+  socket.onclose = onClose;
+  socket.onmessage = onMessage;
+}
 let pendingTick = null;
 const swarms = new Map();
 
-function send(msg) { socket.send(JSON.stringify(msg)); }
+function send(msg) { if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(msg)); }
 function act(action) { send({ type: "act", action }); }
 function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]); }
 
@@ -275,9 +281,13 @@ function setEntity(id, e, now, fresh) {
 }
 function lerp3(a, b, t) { return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]; }
 
-socket.onopen = () => { $("status").textContent = "live"; $("status").className = ""; };
-socket.onclose = () => { $("status").textContent = "disconnected"; $("status").className = "off"; };
-socket.onmessage = (ev) => {
+const onOpen = () => { $("status").textContent = "live"; $("status").className = ""; };
+const onClose = () => {
+  $("status").textContent = "reconnecting"; $("status").className = "off";
+  pendingTick = null;
+  setTimeout(connect, 1500);
+};
+const onMessage = (ev) => {
   if (ev.data instanceof ArrayBuffer) {
     if (pendingTick) { const t = pendingTick; pendingTick = null; applyTick(t, new Uint16Array(ev.data)); }
     return;
@@ -315,6 +325,8 @@ socket.onmessage = (ev) => {
     if (done) done(msg.result);
   }
 };
+
+connect();
 
 function applyTick(msg, floats) {
   const now = performance.now();
