@@ -6,7 +6,7 @@ use aether_world::{
 };
 use wasmtime::{Caller, Engine, Error, Linker, StoreLimits, Trap};
 
-use crate::capsule::Cap;
+use crate::capsule::{Cap, claim_slot};
 use crate::signal::{Sender, Signal};
 
 const COST_READ: u64 = 20;
@@ -560,18 +560,19 @@ pub(crate) fn linker(engine: &Engine) -> wasmtime::Result<Linker<HostState>> {
 
 fn spawn(s: &mut HostState) -> Result<i32, HostError> {
     s.spawns_left = s.spawns_left.checked_sub(1).ok_or(HostError::SpawnBudget)?;
-    if s.clist.len() >= s.max_clist_len {
+    if s.clist.len() >= s.max_clist_len && !s.clist.iter().skip(1).any(Option::is_none) {
         return Err(HostError::ClistFull);
     }
     if s.txn.live_count(&s.world) >= s.max_entities {
         return Err(HostError::RegionFull);
     }
     let entity = s.txn.spawn(Owner::Capsule(s.capsule));
-    s.clist.push(Some(Cap {
+    let cap = Cap {
         entity,
         write: true,
-    }));
-    i32::try_from(s.clist.len() - 1).map_err(|_| HostError::ClistFull)
+    };
+    let handle = claim_slot(&mut s.clist, cap, s.max_clist_len).ok_or(HostError::ClistFull)?;
+    i32::try_from(handle).map_err(|_| HostError::ClistFull)
 }
 
 fn despawn(s: &mut HostState, h: i32) -> Result<(), HostError> {

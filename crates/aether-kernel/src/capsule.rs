@@ -35,6 +35,18 @@ pub struct Cap {
     pub write: bool,
 }
 
+pub fn claim_slot(clist: &mut Vec<Option<Cap>>, cap: Cap, max: usize) -> Option<usize> {
+    if let Some(free) = clist.iter().skip(1).position(Option::is_none) {
+        clist[free + 1] = Some(cap);
+        return Some(free + 1);
+    }
+    if clist.len() >= max {
+        return None;
+    }
+    clist.push(Some(cap));
+    Some(clist.len() - 1)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {

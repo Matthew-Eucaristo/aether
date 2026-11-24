@@ -84,6 +84,7 @@ fn wire_entity(e: &Entity, halfs: &mut Vec<u16>) -> serde_json::Value {
 }
 
 enum Request {
+    Stop(oneshot::Sender<()>),
     Join {
         actor: Actor,
         reply: oneshot::Sender<(String, broadcast::Receiver<Update>)>,
@@ -222,6 +223,14 @@ fn world_loop(
                 Err(mpsc::RecvTimeoutError::Disconnected) => return,
             };
             match request {
+                Request::Stop(done) => {
+                    match store.checkpoint() {
+                        Ok(()) => println!("checkpointed tick {}", store.kernel().world().tick()),
+                        Err(e) => eprintln!("checkpoint failed: {e}"),
+                    }
+                    let _ = done.send(());
+                    return;
+                }
                 Request::Join { actor, reply } => {
                     let receiver = updates.subscribe();
                     let k = store.kernel();
@@ -526,6 +535,7 @@ async fn main() {
         Some(m) => println!("AI harness: {}", aether_harness::Model::name(&**m)),
         None => println!("AI harness: off (set ANTHROPIC_API_KEY in .env or the environment)"),
     }
+    let stopper = requests.clone();
     let app = App {
         requests,
         token: token.clone(),
@@ -543,7 +553,22 @@ async fn main() {
 
     println!("admin:  http://127.0.0.1:{port}/?token={token}");
     println!("player: http://127.0.0.1:{port}/?player=ana");
-    axum::serve(listener, router).await.expect("server runs");
+    tokio::select! {
+        served = axum::serve(listener, router).into_future() => served.expect("server runs"),
+        () = stop_requested() => {}
+    }
+    let (done, stopped) = oneshot::channel();
+    let _ = tokio::task::spawn_blocking(move || stopper.send(Request::Stop(done))).await;
+    let _ = stopped.await;
+}
+
+async fn stop_requested() {
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("SIGTERM can be watched");
+    tokio::select! {
+        r = tokio::signal::ctrl_c() => r.expect("Ctrl-C can be watched"),
+        _ = term.recv() => {}
+    }
 }
 
 #[cfg(test)]

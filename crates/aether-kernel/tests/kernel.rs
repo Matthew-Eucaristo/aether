@@ -937,6 +937,41 @@ fn capabilities_can_be_granted_and_revoked_after_install() {
     ));
 }
 
+const CHURN: &str = r#"(module
+  (import "world" "spawn" (func $spawn (result i32)))
+  (import "world" "despawn" (func $despawn (param i32)))
+  (func (export "tick")
+    (local $a i32)
+    (local.set $a (call $spawn))
+    (drop (call $spawn))
+    (call $despawn (local.get $a))))"#;
+
+#[test]
+fn freed_handles_are_reused_so_emitters_run_forever() {
+    let law = Law {
+        max_clist_len: 8,
+        ..Law::default()
+    };
+    let mut k = Kernel::new(law, 3);
+    let churn = install(&mut k, CHURN, vec![]);
+    let reports = run(&mut k, 5);
+    for r in &reports {
+        assert_eq!(fault_of(r, churn), None);
+    }
+    let clist = &k.state().capsules[&churn].clist;
+    assert_eq!(
+        clist.len(),
+        8,
+        "one handle per kept entity plus a reused slot"
+    );
+    for r in run(&mut k, 3) {
+        assert!(
+            matches!(fault_of(&r, churn), Some(_)),
+            "the list holds 7 live entities, so a second live spawn has no slot"
+        );
+    }
+}
+
 #[test]
 fn rules_fingerprint() {
     let mut k = Kernel::new(Law::default(), 42);
@@ -955,6 +990,7 @@ fn rules_fingerprint() {
         capsule!("hog"),
         capsule!("rollback"),
         capsule!("spawner"),
+        CHURN,
     ] {
         install(&mut k, name, vec![]);
     }
@@ -995,8 +1031,8 @@ fn rules_fingerprint() {
     assert_eq!(
         (RULES, fingerprint.as_str()),
         (
-            "aether-rules/7",
-            "6fb2aa118e1c620c447bfc0acb8d847302ed134d18d559caa093c1a1a9798855"
+            "aether-rules/8",
+            "03af4f0d0af3cc623a01eef56fe5b1880b92bd6f4b4a4524bca6dbc5136c2d92"
         ),
         "the kernel's observable behaviour changed: if that is intended, bump RULES and update this fingerprint"
     );

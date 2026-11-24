@@ -7,7 +7,7 @@ use wasmtime::{Store, StoreLimitsBuilder, Trap};
 
 use crate::blob::{BlobHash, Blobs};
 use crate::canon::Canon;
-use crate::capsule::{Cap, Capsule, Status};
+use crate::capsule::{Cap, Capsule, Status, claim_slot};
 use crate::host::{HostError, HostState, splitmix64};
 use crate::input::{Action, Actor, Input, InputOutcome};
 use crate::law::Law;
@@ -16,7 +16,7 @@ use crate::runtime::{Runtime, THREAD_STACK};
 use crate::signal::{Sender, Signal};
 
 const LOG_BYTES_PER_TICK: usize = 1024;
-pub const RULES: &str = "aether-rules/7";
+pub const RULES: &str = "aether-rules/8";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct State {
@@ -512,15 +512,13 @@ impl Kernel {
                     .capsules
                     .get_mut(capsule)
                     .expect("authorize_capsule checked existence");
-                if c.clist.len() >= max {
-                    return Err("the capsule's capability list is full".into());
-                }
-                c.clist.push(Some(Cap {
+                let cap = Cap {
                     entity: grant.entity,
                     write: grant.write,
-                }));
-                let handle = u32::try_from(c.clist.len() - 1)
-                    .expect("clist length fits the law's u32 limit");
+                };
+                let handle = claim_slot(&mut c.clist, cap, max)
+                    .ok_or("the capsule's capability list is full")?;
+                let handle = u32::try_from(handle).expect("clist length fits the law's u32 limit");
                 Ok(InputOutcome::Granted(handle))
             }
             Action::Revoke { capsule, handle } => {
