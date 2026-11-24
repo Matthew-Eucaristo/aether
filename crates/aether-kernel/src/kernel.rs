@@ -16,7 +16,8 @@ use crate::runtime::{Runtime, THREAD_STACK};
 use crate::signal::{Sender, Signal};
 
 const LOG_BYTES_PER_TICK: usize = 1024;
-pub const RULES: &str = "aether-rules/8";
+pub const RULES: &str = "aether-rules/9";
+pub const GUARANTEED_FUEL: u64 = 250_000;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct State {
@@ -217,7 +218,7 @@ impl Kernel {
                 .stack_size(THREAD_STACK)
                 .spawn_scoped(s, || {
                     let mut remaining = self.state.law.region_fuel_per_tick;
-                    let floor = remaining / active.len().max(1) as u64;
+                    let floor = (remaining / active.len().max(1) as u64).min(GUARANTEED_FUEL);
                     let count = active.len() as u64;
                     active
                         .into_iter()

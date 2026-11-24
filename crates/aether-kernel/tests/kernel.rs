@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use aether_kernel::{
-    Action, Actor, Budget, Cap, Fault, Grant, Input, InputOutcome, Kernel, KernelError, Law, RULES,
-    Sender, State, Status, TickReport,
+    Action, Actor, Budget, Cap, Fault, GUARANTEED_FUEL, Grant, Input, InputOutcome, Kernel,
+    KernelError, Law, RULES, Sender, State, Status, TickReport,
 };
 use aether_world::{CapsuleId, EntityId, Owner, PlayerId, Usage, Value};
 
@@ -974,7 +974,13 @@ fn freed_handles_are_reused_so_emitters_run_forever() {
 
 #[test]
 fn rules_fingerprint() {
-    let mut k = Kernel::new(Law::default(), 42);
+    let mut k = Kernel::new(
+        Law {
+            region_fuel_per_tick: 12_000_000,
+            ..Law::default()
+        },
+        42,
+    );
     let door = spawn(&mut k, Actor::Admin, &[("open", Value::Num(0.0))]);
     spawn(
         &mut k,
@@ -1031,8 +1037,8 @@ fn rules_fingerprint() {
     assert_eq!(
         (RULES, fingerprint.as_str()),
         (
-            "aether-rules/8",
-            "03af4f0d0af3cc623a01eef56fe5b1880b92bd6f4b4a4524bca6dbc5136c2d92"
+            "aether-rules/9",
+            "489520ef808c8487a9771f655dbcd190ff42dc76ac6333950bfc78d5e9fef244"
         ),
         "the kernel's observable behaviour changed: if that is intended, bump RULES and update this fingerprint"
     );
@@ -1217,8 +1223,13 @@ fn the_region_fuel_budget_keeps_a_fair_share_for_every_capsule() {
     };
     assert_eq!(fault_of(&report, greedy), Some(Fault::OutOfFuel));
     assert!(
-        fuel(greedy) <= 1_000_000,
-        "greedy runs first yet must leave a floor of 1M for each of the other two, took {}",
+        fuel(greedy) <= 3_000_000 - 2 * GUARANTEED_FUEL,
+        "greedy runs first yet must leave the guaranteed fuel for each of the other two, took {}",
+        fuel(greedy)
+    );
+    assert!(
+        fuel(greedy) >= 2_000_000,
+        "fuel the later capsules do not need stays usable by the first, took {}",
         fuel(greedy)
     );
     assert_eq!(fault_of(&report, dice), None);

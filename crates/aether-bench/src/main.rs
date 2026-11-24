@@ -2,12 +2,15 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use aether_kernel::{Action, Actor, BlobHash, Input, Kernel, Law};
+use aether_kernel::{Action, Actor, BlobHash, Grant, Input, InputOutcome, Kernel, Law};
 use aether_store::Store;
-use aether_world::Value;
+use aether_world::{PlayerId, Value};
 
 const BOUNCE: &str = include_str!("../../../capsules/bounce.wat");
 const BLACKHOLE: &str = include_str!("../../../capsules/blackhole.wat");
+const ARENA: &str = include_str!("../../../capsules/arena.wat");
+const RIFLE: &str = include_str!("../../../capsules/rifle.wat");
+const HOUSE: &str = include_str!("../../../capsules/house.wat");
 const SCAN: &str = r#"(module
   (import "world" "find" (func $find (param i32 i32 i64) (result i64)))
   (import "world" "get_num" (func $get (param i64 i32 i32) (result f64)))
@@ -171,6 +174,10 @@ fn main() {
         );
     }
 
+    for players in [8, 32] {
+        battle(players);
+    }
+
     let dir = std::env::temp_dir().join(format!("aether-bench-{}", std::process::id()));
     let mut store = Store::create(PathBuf::from(&dir), law(), 1).expect("store");
     store.step(spawn(10_000)).expect("spawn");
@@ -194,4 +201,125 @@ fn main() {
     Store::open(&dir).expect("reopen");
     row("reopen with 10000 entities", start.elapsed(), String::new());
     std::fs::remove_dir_all(&dir).expect("bench dir is removable");
+}
+
+fn battle(players: usize) {
+    let law = law();
+    let mut k = Kernel::new(law.clone(), 1);
+    let arena = k.add_blob(ARENA.as_bytes().to_vec());
+    let rifle = k.add_blob(RIFLE.as_bytes().to_vec());
+    let house = k.add_blob(HOUSE.as_bytes().to_vec());
+    k.step(vec![Input {
+        actor: Actor::Admin,
+        action: Action::Install {
+            wasm: arena,
+            grants: Vec::new(),
+            budget: law.ceiling,
+        },
+    }]);
+    k.step(install(house, 1));
+    let hub = k
+        .state()
+        .capsules
+        .values()
+        .next()
+        .expect("arena")
+        .self_entity;
+    let who = |i: usize| Actor::Player(PlayerId(format!("p{i}")));
+    let mut avatars = Vec::new();
+    for i in 0..players {
+        let a = i as f64 / players as f64 * std::f64::consts::TAU;
+        let r = k.step(vec![Input {
+            actor: who(i),
+            action: Action::Spawn {
+                components: BTreeMap::from([
+                    ("avatar".to_owned(), Value::Bool(true)),
+                    ("pos.x".to_owned(), Value::Num(12.0 * a.cos())),
+                    ("pos.y".to_owned(), Value::Num(12.0 * a.sin())),
+                    ("pos.z".to_owned(), Value::Num(0.9)),
+                    ("aim.x".to_owned(), Value::Num(-a.cos())),
+                    ("aim.y".to_owned(), Value::Num(-a.sin())),
+                    ("aim.z".to_owned(), Value::Num(0.0)),
+                ]),
+            },
+        }]);
+        let InputOutcome::Spawned(id) = r.inputs[0] else {
+            panic!("{:?}", r.inputs[0])
+        };
+        k.step(vec![
+            Input {
+                actor: who(i),
+                action: Action::Signal {
+                    entity: hub,
+                    name: "join".into(),
+                    value: id.0 as f64,
+                },
+            },
+            Input {
+                actor: who(i),
+                action: Action::Install {
+                    wasm: rifle,
+                    grants: vec![Grant {
+                        entity: id,
+                        write: false,
+                    }],
+                    budget: Law::default().ceiling,
+                },
+            },
+        ]);
+        avatars.push(id);
+    }
+    let mut t = 0u64;
+    let mut fuel = 0;
+    let mut bullets = 0;
+    let d = per_tick(
+        || {
+            t += 1;
+            let inputs = avatars
+                .iter()
+                .enumerate()
+                .flat_map(|(i, id)| {
+                    [
+                        Input {
+                            actor: who(i),
+                            action: Action::Signal {
+                                entity: *id,
+                                name: "fire".into(),
+                                value: 1.0,
+                            },
+                        },
+                        Input {
+                            actor: who(i),
+                            action: Action::Set {
+                                entity: *id,
+                                key: "pos.z".into(),
+                                value: Value::Num(0.9 + (t % 7) as f64 * 0.01),
+                            },
+                        },
+                    ]
+                })
+                .collect();
+            let r = k.step(inputs);
+            for run in &r.runs {
+                assert!(
+                    run.fault.is_none(),
+                    "capsule {:?}: {:?}",
+                    run.capsule,
+                    run.fault
+                );
+            }
+            fuel = r.runs.iter().map(|x| x.fuel_used).sum();
+            bullets = k
+                .world()
+                .entities()
+                .filter(|(_, e)| e.components.contains_key("projectile"))
+                .count();
+        },
+        50,
+    );
+    row(
+        &format!("battle: {players} players firing rifles + arena"),
+        d,
+        format!("{fuel} fuel, {bullets} bullets in flight"),
+    );
 }
