@@ -413,3 +413,47 @@ fn streamed_turns_are_reassembled() {
         Err(HarnessError::Truncated)
     ));
 }
+
+#[tokio::test]
+async fn trials_warn_about_parts_without_a_shape() {
+    let blob = r#"(module
+  (import "world" "spawn" (func $spawn (result i32)))
+  (import "world" "set_num" (func $set (param i32 i32 i32 f64)))
+  (import "world" "set_bool" (func $set_bool (param i32 i32 i32 i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "scale.x")
+  (data (i32.const 8) "solid")
+  (func (export "tick")
+    (local $h i32)
+    (local.set $h (call $spawn))
+    (call $set (local.get $h) (i32.const 0) (i32.const 7) (f64.const 4))
+    (call $set_bool (local.get $h) (i32.const 8) (i32.const 5) (i32.const 1))))"#;
+    let bench = KernelBench(Mutex::new(Kernel::new(Law::default(), 5)));
+    let model = Scripted::new(vec![
+        call(
+            "1",
+            "trial",
+            json!({"wat": blob, "capsule": -1, "grants": [], "ticks": 1}),
+        ),
+        say("done"),
+    ]);
+    realize(
+        &model,
+        &bench,
+        Actor::Player(PlayerId("ana".into())),
+        "wall",
+        |_| {},
+    )
+    .await
+    .unwrap();
+    let seen = model.seen.lock().unwrap();
+    let Some(Message::ToolResults(r)) = seen[1].last() else {
+        panic!()
+    };
+    let report = &r[0].content;
+    assert!(!r[0].is_error, "{report}");
+    assert!(
+        report.contains("Warning: 1 entities set scale or solid but no shape"),
+        "{report}"
+    );
+}

@@ -577,6 +577,30 @@ pub fn trial(k: &Kernel, actor: &Actor, input: &TrialIn) -> Trial {
         };
         let _ = writeln!(out, "  {}{motion}", entity_line(*eid, e));
     }
+    let unshaped: Vec<String> = end
+        .iter()
+        .filter(|(_, e)| {
+            !e.components.contains_key("shape")
+                && ["scale.x", "scale.y", "scale.z", "solid"]
+                    .iter()
+                    .any(|k| e.components.contains_key(*k))
+        })
+        .map(|(eid, _)| format!("#{}", eid.0))
+        .collect();
+    if !unshaped.is_empty() {
+        let _ = writeln!(
+            out,
+            "Warning: {} entities set scale or solid but no shape ({}{}). Without shape they render as spheres stretched by scale, and nothing ever collides with them. Walls, floors and roofs need shape = \"box\".",
+            unshaped.len(),
+            unshaped
+                .iter()
+                .take(12)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" "),
+            if unshaped.len() > 12 { " …" } else { "" }
+        );
+    }
     let others: Vec<String> = touched
         .iter()
         .filter(|t| !end.iter().any(|(e, _)| e == *t) && !start.iter().any(|(e, _)| e == *t))
