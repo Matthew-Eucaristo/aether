@@ -7,16 +7,19 @@ use std::time::{Duration, Instant};
 use aether_harness::{Bench, Claude, Event, HarnessError, realize};
 use aether_kernel::{Action, Actor, BlobHash, Input, InputOutcome, Kernel, Law};
 use aether_store::Store;
-use aether_world::{Entity, EntityId, PlayerId, Value};
+use aether_world::PlayerId;
 use axum::Router;
-use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::oneshot;
+
+mod view;
+
+use view::{Cache, Focus, OUTBOX, Sent, TickText, Update, Viewer};
 
 const TICK: Duration = Duration::from_millis(100);
 const CHECKPOINT_EVERY: u64 = 600;
@@ -41,55 +44,18 @@ const EXAMPLES: [(&str, &str); 15] = [
     ("rollback", include_str!("../../../capsules/rollback.wat")),
 ];
 
-struct Frame {
-    text: String,
-    halfs: Option<Bytes>,
-}
-
-type Update = Arc<Frame>;
-
-fn half(x: f32) -> u16 {
-    let bits = x.to_bits();
-    let sign = ((bits >> 16) & 0x8000) as u16;
-    let exp = ((bits >> 23) & 0xff) as i32 - 127 + 15;
-    let mant = bits & 0x7f_ffff;
-    if exp >= 31 {
-        return sign | 0x7bff;
-    }
-    if exp <= 0 {
-        if exp < -10 {
-            return sign;
-        }
-        let m = (mant | 0x80_0000) >> (1 - exp);
-        return sign | ((m + 0x1000) >> 13) as u16;
-    }
-    let rounded = (((exp as u32) << 10) | (mant >> 13)) + ((mant >> 12) & 1);
-    sign | rounded.min(0x7bff) as u16
-}
-
-fn wire_entity(e: &Entity, halfs: &mut Vec<u16>) -> serde_json::Value {
-    let components: serde_json::Map<String, serde_json::Value> = e
-        .components
-        .iter()
-        .map(|(k, v)| {
-            let encoded = match v {
-                Value::Nums(n) => {
-                    let at = halfs.len();
-                    halfs.extend(n.iter().map(|x| half(*x as f32)));
-                    serde_json::json!({ "halfs": [at, n.len()] })
-                }
-                other => serde_json::to_value(other).expect("values serialize"),
-            };
-            (k.clone(), encoded)
-        })
-        .collect();
-    serde_json::json!({ "owner": e.owner, "components": components })
-}
-
 enum Request {
     Stop(oneshot::Sender<()>),
     Join {
-        reply: oneshot::Sender<(Arc<str>, broadcast::Receiver<Update>)>,
+        actor: Actor,
+        reply: oneshot::Sender<(u64, tokio::sync::mpsc::Receiver<Update>)>,
+    },
+    Focus {
+        viewer: u64,
+        focus: Focus,
+    },
+    Leave {
+        viewer: u64,
     },
     Act {
         input: Input,
@@ -109,14 +75,6 @@ enum Request {
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ServerMsg<'a> {
-    Tick {
-        report: &'a aether_kernel::TickReport,
-        inputs: &'a [Input],
-        changed: BTreeMap<EntityId, Option<serde_json::Value>>,
-        halfs: usize,
-        capsules: &'a BTreeMap<aether_world::CapsuleId, aether_kernel::Capsule>,
-        law: &'a Law,
-    },
     Uploaded {
         id: u64,
         result: Result<BlobHash, String>,
@@ -137,23 +95,13 @@ enum ServerMsg<'a> {
     },
 }
 
-#[derive(Serialize)]
-struct World<'a> {
-    state: &'a aether_kernel::State,
-    head: BlobHash,
-}
-
-fn hello(you: &Actor, world: &str) -> String {
-    let you = serde_json::to_string(you).expect("actors serialize");
-    format!("{{\"type\":\"hello\",\"you\":{you},{}", &world[1..])
-}
-
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientMsg {
     Act { action: Action },
     Upload { id: u64, source: String },
     Intent { text: String },
+    Focus { dim: i64, x: f64, y: f64 },
 }
 
 #[derive(Clone)]
@@ -217,16 +165,14 @@ fn random_u64() -> u64 {
     u64::from_le_bytes(bytes)
 }
 
-fn world_loop(
-    mut store: Store,
-    requests: mpsc::Receiver<Request>,
-    updates: broadcast::Sender<Update>,
-) {
+fn world_loop(mut store: Store, requests: mpsc::Receiver<Request>) {
     let mut next = Instant::now() + TICK;
+    let mut viewers: BTreeMap<u64, Viewer> = BTreeMap::new();
+    let mut next_viewer = 0u64;
+    let mut cache = Cache::default();
     loop {
         let mut inputs = Vec::new();
         let mut waiting: Vec<(usize, oneshot::Sender<InputOutcome>)> = Vec::new();
-        let mut world: Option<Arc<str>> = None;
         let mut served = 0usize;
         loop {
             let timeout = next.saturating_duration_since(Instant::now());
@@ -248,20 +194,26 @@ fn world_loop(
                     let _ = done.send(());
                     return;
                 }
-                Request::Join { reply } => {
-                    let receiver = updates.subscribe();
-                    let k = store.kernel();
-                    let world = world
-                        .get_or_insert_with(|| {
-                            serde_json::to_string(&World {
-                                state: k.state(),
-                                head: k.state_hash(),
-                            })
-                            .expect("state serializes")
-                            .into()
-                        })
-                        .clone();
-                    let _ = reply.send((world, receiver));
+                Request::Join { actor, reply } => {
+                    let (tx, rx) = tokio::sync::mpsc::channel(OUTBOX);
+                    let mut viewer = Viewer::new(actor, tx);
+                    if let Sent::Gone = view::hello(store.kernel(), &mut viewer, &mut cache) {
+                        continue;
+                    }
+                    next_viewer += 1;
+                    viewers.insert(next_viewer, viewer);
+                    let _ = reply.send((next_viewer, rx));
+                }
+                Request::Focus { viewer, focus } => {
+                    if let Some(v) = viewers.get_mut(&viewer)
+                        && focus.x.is_finite()
+                        && focus.y.is_finite()
+                    {
+                        v.focus = focus;
+                    }
+                }
+                Request::Leave { viewer } => {
+                    viewers.remove(&viewer);
                 }
                 Request::Blob { hash, reply } => {
                     let _ = reply.send(store.kernel().blobs().get(&hash).cloned());
@@ -305,36 +257,15 @@ fn world_loop(
         for (index, reply) in waiting {
             let _ = reply.send(report.inputs[index].clone());
         }
+        cache = Cache::default();
+        let text = TickText::new(&report, &inputs);
         let k = store.kernel();
-        let mut halfs = Vec::new();
-        let changed = report
-            .touched
-            .iter()
-            .map(|id| {
-                (
-                    *id,
-                    k.world().entity(*id).map(|e| wire_entity(e, &mut halfs)),
-                )
-            })
-            .collect();
-        let text = serde_json::to_string(&ServerMsg::Tick {
-            report: &report,
-            inputs: &inputs,
-            changed,
-            halfs: halfs.len(),
-            capsules: &k.state().capsules,
-            law: &k.state().law,
-        })
-        .expect("tick serializes");
-        let halfs = (!halfs.is_empty()).then(|| {
-            Bytes::from(
-                halfs
-                    .iter()
-                    .flat_map(|h| h.to_le_bytes())
-                    .collect::<Vec<u8>>(),
+        viewers.retain(|_, viewer| {
+            !matches!(
+                view::tick(k, &report, &text, viewer, &mut cache),
+                Sent::Gone
             )
         });
-        let _ = updates.send(Arc::new(Frame { text, halfs }));
         if report.tick % CHECKPOINT_EVERY == 0
             && let Err(e) = store.checkpoint()
         {
@@ -388,21 +319,32 @@ async fn send_busy(socket: &mut WebSocket) -> Result<(), axum::Error> {
     socket.send(Message::text(msg)).await
 }
 
-async fn session(mut socket: WebSocket, actor: Actor, app: App) {
+async fn session(socket: WebSocket, actor: Actor, app: App) {
     let (reply, joined) = oneshot::channel();
-    if app.requests.try_send(Request::Join { reply }).is_err() {
-        return;
-    }
-    let Ok((world, mut updates)) = joined.await else {
-        return;
-    };
-    if socket
-        .send(Message::text(hello(&actor, &world)))
-        .await
+    if app
+        .requests
+        .try_send(Request::Join {
+            actor: actor.clone(),
+            reply,
+        })
         .is_err()
     {
         return;
     }
+    let Ok((viewer, updates)) = joined.await else {
+        return;
+    };
+    serve(socket, actor, viewer, updates, &app).await;
+    let _ = app.requests.try_send(Request::Leave { viewer });
+}
+
+async fn serve(
+    mut socket: WebSocket,
+    actor: Actor,
+    viewer: u64,
+    mut updates: tokio::sync::mpsc::Receiver<Update>,
+    app: &App,
+) {
     let (harness_tx, mut harness_rx) = tokio::sync::mpsc::unbounded_channel::<(String, bool)>();
     let mut running = false;
     loop {
@@ -447,6 +389,9 @@ async fn session(mut socket: WebSocket, actor: Actor, app: App) {
                             }
                             Err(mpsc::TrySendError::Disconnected(_)) => return,
                         }
+                    }
+                    Ok(ClientMsg::Focus { dim, x, y }) => {
+                        let _ = app.requests.try_send(Request::Focus { viewer, focus: Focus { dim, x, y } });
                     }
                     Ok(ClientMsg::Upload { id, source }) => {
                         let (reply, done) = oneshot::channel();
@@ -525,22 +470,7 @@ async fn session(mut socket: WebSocket, actor: Actor, app: App) {
                 }
             }
             update = updates.recv() => {
-                let update = match update {
-                    Ok(update) => update,
-                    Err(broadcast::error::RecvError::Lagged(_)) => {
-                        let (reply, joined) = oneshot::channel();
-                        if app.requests.try_send(Request::Join { reply }).is_err() {
-                            return;
-                        }
-                        let Ok((world, fresh)) = joined.await else { return };
-                        updates = fresh;
-                        if socket.send(Message::text(hello(&actor, &world))).await.is_err() {
-                            return;
-                        }
-                        continue;
-                    }
-                    Err(broadcast::error::RecvError::Closed) => return,
-                };
+                let Some(update) = update else { return };
                 if socket.send(Message::text(update.text.clone())).await.is_err() {
                     return;
                 }
@@ -601,8 +531,7 @@ async fn main() {
     );
 
     let (requests, inbox) = mpsc::sync_channel(QUEUE);
-    let (updates, _) = broadcast::channel(256);
-    std::thread::spawn(move || world_loop(store, inbox, updates));
+    std::thread::spawn(move || world_loop(store, inbox));
 
     let token: Arc<str> = format!("{:016x}{:016x}", random_u64(), random_u64()).into();
     let examples: BTreeMap<&str, &str> = EXAMPLES.into_iter().collect();
@@ -645,23 +574,5 @@ async fn stop_requested() {
     tokio::select! {
         r = tokio::signal::ctrl_c() => r.expect("Ctrl-C can be watched"),
         _ = term.recv() => {}
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::half;
-
-    #[test]
-    fn half_floats_round_to_nearest_and_saturate() {
-        assert_eq!(half(0.0), 0x0000);
-        assert_eq!(half(-0.0), 0x8000);
-        assert_eq!(half(1.0), 0x3c00);
-        assert_eq!(half(-2.5), 0xc100);
-        assert_eq!(half(0.1), 0x2e66);
-        assert_eq!(half(65504.0), 0x7bff);
-        assert_eq!(half(1.0e9), 0x7bff);
-        assert_eq!(half(6.0e-8), 0x0001);
-        assert_eq!(half(1.0e-12), 0x0000);
     }
 }

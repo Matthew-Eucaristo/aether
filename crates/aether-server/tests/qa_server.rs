@@ -661,3 +661,64 @@ fn a_client_close_is_answered_with_a_close_frame() {
     }
     panic!("no close frame came back");
 }
+
+fn spawn_at(ws: &mut Ws, tag: f64, x: Option<f64>) -> u64 {
+    let pos = x.map_or(String::new(), |x| {
+        format!(r#","pos.x":{{"num":{x}}},"pos.y":{{"num":0}}"#)
+    });
+    ws.send_text(&format!(
+        r#"{{"type":"act","action":{{"op":"spawn","components":{{"tag":{{"num":{tag}}}{pos}}}}}}}"#
+    ))
+    .unwrap();
+    loop {
+        let tick = ws.wait_tick();
+        let inputs = tick["inputs"].as_array().unwrap();
+        let outcomes = tick["report"]["inputs"].as_array().unwrap();
+        for (inp, out) in inputs.iter().zip(outcomes.iter()) {
+            if inp["action"]["components"]["tag"]["num"] == tag {
+                return out["spawned"].as_u64().unwrap();
+            }
+        }
+    }
+}
+
+#[test]
+fn viewers_get_what_is_near_their_focus_and_lose_what_leaves_it() {
+    let server = fresh_server("interest");
+    let mut admin = Ws::connect(server.port, &format!("token={}", server.token)).unwrap();
+    admin.recv_json().unwrap();
+    let here = spawn_at(&mut admin, 1.0, Some(5.0));
+    let far = spawn_at(&mut admin, 2.0, Some(1000.0));
+    let global = spawn_at(&mut admin, 3.0, None);
+    let mut ws = Ws::connect(server.port, "player=watcher").unwrap();
+    let hello = ws.recv_json().unwrap();
+    let entities = &hello["state"]["world"]["entities"];
+    assert!(
+        entities[here.to_string()].is_object(),
+        "near entities come in the hello"
+    );
+    assert!(
+        entities[global.to_string()].is_object(),
+        "entities without a place go to everyone"
+    );
+    assert!(
+        entities[far.to_string()].is_null(),
+        "far entities stay with the server"
+    );
+    ws.send_text(r#"{"type":"focus","dim":0,"x":1000,"y":0}"#)
+        .unwrap();
+    let (mut arrived, mut gone) = (false, false);
+    for _ in 0..30 {
+        let tick = ws.wait_tick();
+        arrived |= tick["changed"][far.to_string()].is_object();
+        gone |= tick["left"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id.as_u64() == Some(here));
+        if arrived && gone {
+            return;
+        }
+    }
+    panic!("moving the focus must bring the far entity ({arrived}) and drop the near one ({gone})");
+}

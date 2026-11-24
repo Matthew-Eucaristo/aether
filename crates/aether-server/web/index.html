@@ -289,26 +289,17 @@ const onClose = () => {
 };
 const onMessage = (ev) => {
   if (ev.data instanceof ArrayBuffer) {
-    if (pendingTick) { const t = pendingTick; pendingTick = null; applyTick(t, new Uint16Array(ev.data)); }
+    if (pendingTick) {
+      const t = pendingTick; pendingTick = null;
+      (t.type === "hello" ? applyHello : applyTick)(t, new Uint16Array(ev.data));
+    }
     return;
   }
   const msg = JSON.parse(ev.data);
-  if (msg.type === "tick" && msg.halfs > 0) { pendingTick = msg; return; }
+  if ((msg.type === "tick" || msg.type === "hello") && msg.halfs > 0) { pendingTick = msg; return; }
   if (msg.type === "tick") { applyTick(msg, null); return; }
-  const now = performance.now();
-  if (msg.type === "hello") {
-    world.you = msg.you;
-    world.entities.clear(); motion.clear(); swarms.clear();
-    for (const [id, e] of Object.entries(msg.state.world.entities)) setEntity(Number(id), decodeComponents(e, null), now, true);
-    world.capsules = msg.state.capsules;
-    world.law = msg.state.law;
-    world.tick = msg.state.world.tick;
-    $("you").textContent = actorName(msg.you);
-    $("hash").textContent = msg.head.slice(0, 12);
-    $("law").value = JSON.stringify(world.law, null, 1);
-    $("lawbox").style.display = msg.you === "admin" ? "" : "none";
-    renderPanels();
-  } else if (msg.type === "harness") {
+  if (msg.type === "hello") { applyHello(msg, null); return; }
+  if (msg.type === "harness") {
     harnessEvent(msg.event);
   } else if (msg.type === "harness_done") {
     harnessLine(`<div class="said">${esc(msg.reply)}</div>`);
@@ -330,10 +321,40 @@ const onMessage = (ev) => {
 
 connect();
 
+function applyHello(msg, floats) {
+  const now = performance.now();
+  world.you = msg.you;
+  world.entities.clear(); motion.clear(); swarms.clear();
+  for (const [id, e] of Object.entries(msg.state.world.entities)) setEntity(Number(id), decodeComponents(e, floats), now, true);
+  world.capsules = msg.state.capsules;
+  world.law = msg.state.law;
+  world.tick = msg.state.world.tick;
+  focusSent = null;
+  $("you").textContent = actorName(msg.you);
+  $("hash").textContent = msg.head.slice(0, 12);
+  $("law").value = JSON.stringify(world.law, null, 1);
+  $("lawbox").style.display = msg.you === "admin" ? "" : "none";
+  renderPanels();
+}
+
+let focusSent = null;
+function sendFocus() {
+  const av = play.active && play.avatar !== null ? world.entities.get(play.avatar) : null;
+  const dim = av ? Math.trunc(num(av, "dim") ?? 0) : viewDim;
+  const p = av && play.pos ? [play.pos[0], play.pos[1]] : [cam.target[0], -cam.target[2]];
+  const now = performance.now();
+  if (focusSent && focusSent.dim === dim && Math.hypot(p[0] - focusSent.x, p[1] - focusSent.y) < 8 && now - focusSent.t < 2000) return;
+  focusSent = { dim, x: p[0], y: p[1], t: now };
+  send({ type: "focus", dim, x: p[0], y: p[1] });
+}
+let viewDim = 0;
+setInterval(sendFocus, 250);
+
 function applyTick(msg, floats) {
   const now = performance.now();
   const r = msg.report;
   world.tick = r.tick;
+  for (const id of msg.left || []) setEntity(id, null, now, false);
   for (const [id, e] of Object.entries(msg.changed)) setEntity(Number(id), e && decodeComponents(e, floats), now, false);
   world.capsules = msg.capsules;
   if (JSON.stringify(world.law) !== JSON.stringify(msg.law)) {
