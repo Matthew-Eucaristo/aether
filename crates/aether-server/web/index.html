@@ -737,9 +737,9 @@ function shapeMesh(geom) {
   return { vao, vbo, inst, count: geom.idx.length, data: new Float32Array(1024), n: 0 };
 }
 const TERRAIN_N = 97, TERRAIN_STEP = 3;
-function terrainGeom(cx, cy) {
+function terrainGeom(cx, cy, height) {
   const v = [], idx = [], half = (TERRAIN_N - 1) / 2;
-  const at = (i, j) => groundAt(cx + (i - half) * TERRAIN_STEP, cy + (j - half) * TERRAIN_STEP);
+  const at = (i, j) => height(cx + (i - half) * TERRAIN_STEP, cy + (j - half) * TERRAIN_STEP);
   for (let j = 0; j < TERRAIN_N; j++) {
     for (let i = 0; i < TERRAIN_N; i++) {
       const x = cx + (i - half) * TERRAIN_STEP, y = cy + (j - half) * TERRAIN_STEP;
@@ -760,7 +760,7 @@ const SHAPES = {
   sphere: shapeMesh(sphereGeom(14, 24)),
   box: shapeMesh(boxGeom()),
   cylinder: shapeMesh(cylinderGeom(28)),
-  terrain: shapeMesh(terrainGeom(0, 0)),
+  terrain: shapeMesh(terrainGeom(0, 0, () => 0)),
 };
 const terrainAt = { key: "" };
 function updateTerrain() {
@@ -772,7 +772,7 @@ function updateTerrain() {
   const key = JSON.stringify([t, cx, cy, currentDim()]);
   if (key !== terrainAt.key) {
     terrainAt.key = key;
-    const geom = terrainGeom(cx, cy);
+    const geom = terrainGeom(cx, cy, groundAt);
     gl.bindVertexArray(mesh.vao);
     gl.bindBuffer(gl.ARRAY_BUFFER, mesh.vbo);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(geom.v), gl.STATIC_DRAW);
