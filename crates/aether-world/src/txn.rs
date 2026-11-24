@@ -5,7 +5,7 @@ use crate::types::{
     Entity, EntityId, MAX_COMPONENTS, Owner, Value, WorldError, entity_bytes, validate_key,
     validate_value,
 };
-use crate::world::World;
+use crate::world::{MAX_RADIUS, Place, World};
 
 #[derive(Debug)]
 pub struct Txn {
@@ -93,6 +93,39 @@ impl Txn {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         };
+        (found, examined)
+    }
+
+    pub fn near(
+        &self,
+        world: &World,
+        dim: i64,
+        x: f64,
+        y: f64,
+        r: f64,
+        after: Option<EntityId>,
+    ) -> (Option<EntityId>, u64) {
+        let r = r.clamp(0.0, MAX_RADIUS);
+        let beyond = |id: &EntityId| after.is_none_or(|a| *id > a);
+        let inside = |e: &Entity| Place::of(e).is_some_and(|p| p.within(dim, x, y, r));
+        let mut examined = 0;
+        let mut found: Option<EntityId> = None;
+        for id in world.in_cells(dim, x, y, r) {
+            examined += 1;
+            if beyond(&id)
+                && !self.overlay.contains_key(&id)
+                && world.entity(id).is_some_and(inside)
+                && found.is_none_or(|f| id < f)
+            {
+                found = Some(id);
+            }
+        }
+        for (id, slot) in &self.overlay {
+            examined += 1;
+            if beyond(id) && slot.as_ref().is_some_and(inside) && found.is_none_or(|f| *id < f) {
+                found = Some(*id);
+            }
+        }
         (found, examined)
     }
 

@@ -69,6 +69,7 @@ Reads (public, take an entity id as i64):
   (func $get_nums (param i64 i32 i32 i32 i32) (result i32))  id, key ptr, key len, buffer ptr, max count -> array length; copies the f64s (little endian) only when length <= max count
   (func $owner (param i64 i32 i32) (result i32))             id, buffer ptr, buffer len -> length of "region", "player:<name>" or "capsule:<id>"; -1 if the entity is gone
   (func $find (param i32 i32 i64) (result i64))              key ptr, key len, after -> next entity id above `after` that has the key, -1 when none; start with after = -1
+  (func $near (param i64 f64 f64 f64 i64) (result i64))      dim, x, y, radius (at most 512), after -> next entity id above `after` whose pos.x, pos.y lies within radius metres in that dim, -1 when none; start with after = -1
 Writes (need a handle):
   (func $set_num (param i32 i32 i32 f64))                    handle, key ptr, key len, value
   (func $set_text (param i32 i32 i32 i32 i32))               handle, key ptr, key len, text ptr, text len
@@ -92,7 +93,7 @@ Other:
   (func $tick (result i64))                                  current tick number (tick / 10 = seconds)
   (func $random (result i64))                                deterministic random 64 bits
   (func $log (param i32 i32))                                ptr, len; shown to people in the event log (1024 bytes per tick)
-Costs in fuel: get_nums and set_nums cost 1 per number on top of a read or write; each read 20, find 20 plus 1 per entity examined, get_text 20 plus its length, each write 50 (texts add their length), spawn 1000, despawn 200, log 10 plus its length.
+Costs in fuel: get_nums and set_nums cost 1 per number on top of a read or write; each read 20, find and near 20 plus 1 per entity examined, get_text 20 plus its length, each write 50 (texts add their length), spawn 1000, despawn 200, log 10 plus its length.
 
 # Patterns that work
 

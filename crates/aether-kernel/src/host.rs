@@ -511,6 +511,25 @@ pub(crate) fn linker(engine: &Engine) -> wasmtime::Result<Linker<HostState>> {
 
     l.func_wrap(
         "world",
+        "near",
+        |mut c: Caller<'_, HostState>,
+         dim: i64,
+         x: f64,
+         y: f64,
+         r: f64,
+         after: i64|
+         -> wasmtime::Result<i64> {
+            charge(&mut c, COST_READ)?;
+            let after = u64::try_from(after).ok().map(EntityId);
+            let s = c.data();
+            let (found, examined) = s.txn.near(&s.world, dim, x, y, r, after);
+            charge(&mut c, examined)?;
+            Ok(found.map_or(-1, id_to_i64))
+        },
+    )?;
+
+    l.func_wrap(
+        "world",
         "set_num",
         |mut c: Caller<'_, HostState>, h: i32, kp: i32, kl: i32, v: f64| -> wasmtime::Result<()> {
             charge(&mut c, COST_WRITE)?;

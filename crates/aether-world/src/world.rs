@@ -64,12 +64,57 @@ impl Digest {
 
 const PARALLEL_FROM: usize = 64;
 
+pub const CELL: f64 = 16.0;
+pub const MAX_RADIUS: f64 = 512.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Cell {
+    dim: i64,
+    x: i64,
+    y: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Place {
+    pub dim: i64,
+    pub x: f64,
+    pub y: f64,
+}
+
+impl Place {
+    pub fn of(entity: &Entity) -> Option<Place> {
+        let num = |key: &str| match entity.components.get(key) {
+            Some(Value::Num(n)) => Some(*n),
+            _ => None,
+        };
+        Some(Place {
+            dim: num("dim").map_or(0, |d| d as i64),
+            x: num("pos.x")?,
+            y: num("pos.y").unwrap_or(0.0),
+        })
+    }
+
+    fn cell(self) -> Cell {
+        Cell {
+            dim: self.dim,
+            x: (self.x / CELL).floor() as i64,
+            y: (self.y / CELL).floor() as i64,
+        }
+    }
+
+    pub fn within(self, dim: i64, x: f64, y: f64, r: f64) -> bool {
+        let (dx, dy) = (self.x - x, self.y - y);
+        self.dim == dim && dx * dx + dy * dy <= r * r
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Derived {
     digest: Digest,
     stale: BTreeMap<EntityId, Option<Entity>>,
     by_key: BTreeMap<String, BTreeSet<EntityId>>,
     usage: BTreeMap<Owner, Usage>,
+    cells: BTreeMap<Cell, BTreeSet<EntityId>>,
 }
 
 impl Derived {
@@ -103,7 +148,27 @@ impl Derived {
         }
     }
 
+    fn locate(&mut self, id: EntityId, old: Option<&Entity>, new: Option<&Entity>) {
+        let before = old.and_then(Place::of).map(Place::cell);
+        let after = new.and_then(Place::of).map(Place::cell);
+        if before == after {
+            return;
+        }
+        if let Some(cell) = before
+            && let Some(ids) = self.cells.get_mut(&cell)
+        {
+            ids.remove(&id);
+            if ids.is_empty() {
+                self.cells.remove(&cell);
+            }
+        }
+        if let Some(cell) = after {
+            self.cells.entry(cell).or_default().insert(id);
+        }
+    }
+
     fn change(&mut self, id: EntityId, old: Option<&Entity>, new: Option<&Entity>) {
+        self.locate(id, old, new);
         let empty = BTreeMap::new();
         let before = old.map_or(&empty, |e| &e.components);
         let after = new.map_or(&empty, |e| &e.components);
@@ -227,6 +292,58 @@ impl World {
 
     pub fn usage(&self, owner: &Owner) -> Usage {
         self.derived.usage.get(owner).copied().unwrap_or_default()
+    }
+
+    pub fn near(&self, dim: i64, x: f64, y: f64, r: f64) -> Vec<EntityId> {
+        let r = r.clamp(0.0, MAX_RADIUS);
+        let mut found: Vec<EntityId> = self
+            .in_cells(dim, x, y, r)
+            .into_iter()
+            .filter(|id| {
+                self.entities
+                    .get(id)
+                    .and_then(Place::of)
+                    .is_some_and(|p| p.within(dim, x, y, r))
+            })
+            .collect();
+        found.sort_unstable();
+        found
+    }
+
+    pub(crate) fn in_cells(&self, dim: i64, x: f64, y: f64, r: f64) -> Vec<EntityId> {
+        let r = r.clamp(0.0, MAX_RADIUS);
+        if !(x.is_finite() && y.is_finite()) {
+            return Vec::new();
+        }
+        let lo = Place {
+            dim,
+            x: x - r,
+            y: y - r,
+        }
+        .cell();
+        let hi = Place {
+            dim,
+            x: x + r,
+            y: y + r,
+        }
+        .cell();
+        let mut ids = Vec::new();
+        for cx in lo.x..=hi.x {
+            let from = Cell {
+                dim,
+                x: cx,
+                y: lo.y,
+            };
+            let to = Cell {
+                dim,
+                x: cx,
+                y: hi.y,
+            };
+            for (_, cell) in self.derived.cells.range(from..=to) {
+                ids.extend(cell.iter().copied());
+            }
+        }
+        ids
     }
 
     pub(crate) fn ids_with(&self, key: &str) -> Option<&BTreeSet<EntityId>> {

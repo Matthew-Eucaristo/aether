@@ -8,4 +8,4 @@ pub use types::{
     MAX_TEXT_LEN, Owner, PlayerId, Usage, Value, WorldError, entity_bytes, validate_key,
     validate_value, value_bytes,
 };
-pub use world::World;
+pub use world::{CELL, MAX_RADIUS, Place, World};

@@ -1001,6 +1001,45 @@ const CHURN: &str = r#"(module
     (drop (call $spawn))
     (call $despawn (local.get $a))))"#;
 
+const NEAR: &str = r#"(module
+  (import "world" "near" (func $near (param i64 f64 f64 f64 i64) (result i64)))
+  (import "world" "set_num" (func $set (param i32 i32 i32 f64)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "near")
+  (func (export "tick")
+    (local $id i64) (local $n f64)
+    (local.set $id (i64.const -1))
+    (block $done
+      (loop $next
+        (local.set $id (call $near (i64.const 0) (f64.const 0) (f64.const 0) (f64.const 10) (local.get $id)))
+        (br_if $done (i64.lt_s (local.get $id) (i64.const 0)))
+        (local.set $n (f64.add (local.get $n) (f64.const 1)))
+        (br $next)))
+    (call $set (i32.const 0) (i32.const 0) (i32.const 4) (local.get $n))))"#;
+
+#[test]
+fn capsules_find_what_is_near_a_point_in_their_dimension() {
+    let mut k = Kernel::new(Law::default(), 9);
+    let at = |x: f64, y: f64, dim: f64| {
+        vec![
+            ("pos.x", Value::Num(x)),
+            ("pos.y", Value::Num(y)),
+            ("dim", Value::Num(dim)),
+        ]
+    };
+    for (x, y, dim) in [
+        (1.0, 1.0, 0.0),
+        (9.0, 0.0, 0.0),
+        (11.0, 0.0, 0.0),
+        (0.0, 0.0, 1.0),
+    ] {
+        spawn(&mut k, Actor::Admin, &at(x, y, dim));
+    }
+    let near = install(&mut k, NEAR, vec![]);
+    run(&mut k, 2);
+    assert_eq!(num(&k, self_entity(&k, near), "near"), Some(2.0));
+}
+
 const FLASH: &str = r#"(module
   (import "world" "spawn" (func $spawn (result i32)))
   (import "world" "despawn" (func $despawn (param i32)))
@@ -1059,6 +1098,7 @@ fn rules_fingerprint() {
         capsule!("spawner"),
         CHURN,
         FLASH,
+        NEAR,
         MATH,
     ] {
         install(&mut k, name, vec![]);
@@ -1100,8 +1140,8 @@ fn rules_fingerprint() {
     assert_eq!(
         (RULES, fingerprint.as_str()),
         (
-            "aether-rules/11",
-            "6c8ce1c0bd66f582e6c837453d222d93700a9f524ae5ac123a51007e87ff6063"
+            "aether-rules/12",
+            "1c95b716cc6a2e127d733940dcf610bddb5598c5abe9a683480ea113831768e1"
         ),
         "the kernel's observable behaviour changed: if that is intended, bump RULES and update this fingerprint"
     );
