@@ -58,6 +58,7 @@
   <span title="state hash after the last tick">hash <b id="hash">…</b></span>
   <span id="fps" class="dim"></span>
   <button id="sound" title="Spatial sound from entities with sound.freq">sound off</button>
+  <button id="gitoggle" title="Screen-space global illumination and ambient occlusion">GI on</button>
   <span id="status" class="off">connecting</span>
 </header>
 <main>
@@ -438,7 +439,8 @@ uniform vec3 u_lc[16];
 uniform vec3 u_sun;
 uniform mat4 u_lvp;
 uniform sampler2DShadow u_shadow;
-out vec4 o;
+layout(location=0) out vec4 o;
+layout(location=1) out vec4 o_albedo;
 float sunVisibility(vec3 w, vec3 n) {
   vec4 lp = u_lvp * vec4(w + n * 0.06, 1.0);
   vec3 s = lp.xyz / lp.w * 0.5 + 0.5;
@@ -471,6 +473,7 @@ void main() {
   vec3 c = base * light + spec + rim * 0.3 * base * sky * 3.0 + v_color.a * base * 3.0;
   float fog = clamp(length(v_world - u_eye) / 110.0, 0.0, 1.0);
   o = vec4(mix(c, vec3(0.004, 0.005, 0.009), fog * fog), 1.0);
+  o_albedo = vec4(base * (1.0 - fog), 1.0);
 }`);
 const sparkProg = program(`#version 300 es
 layout(location=0) in vec3 a_prev;
@@ -734,6 +737,10 @@ precision highp float;
 in vec2 v_uv;
 uniform sampler2D u_scene;
 uniform sampler2D u_bloom;
+uniform sampler2D u_gi;
+uniform sampler2D u_albedo;
+uniform float u_giStrength;
+uniform float u_giOn;
 uniform mat4 u_inv;
 uniform vec3 u_eye;
 uniform float u_aspect;
@@ -774,8 +781,12 @@ void main() {
     vec2 bend = (r > 1e-5 ? d / r : vec2(0.0)) * (einstein * einstein / max(r, rh * 0.5));
     uv -= bend / vec2(u_aspect, 1.0) * smoothstep(rh * 0.9, rh * 1.05, r);
   }
-  vec4 scene = (uv.x >= 0.0 && uv.y >= 0.0 && uv.x <= 1.0 && uv.y <= 1.0) ? texture(u_scene, uv) : vec4(0.0);
-  vec3 hdr = scene.rgb + skyAt(uv) * (1.0 - scene.a);
+  bool inside = uv.x >= 0.0 && uv.y >= 0.0 && uv.x <= 1.0 && uv.y <= 1.0;
+  vec4 scene = inside ? texture(u_scene, uv) : vec4(0.0);
+  vec4 gi = inside ? texture(u_gi, uv) : vec4(0.0, 0.0, 0.0, 1.0);
+  vec4 albedo = inside ? texture(u_albedo, uv) : vec4(0.0);
+  vec3 lit = scene.rgb * mix(1.0, gi.a, 0.85 * albedo.a * u_giOn) + albedo.rgb * gi.rgb * u_giStrength * albedo.a * u_giOn;
+  vec3 hdr = lit + skyAt(uv) * (1.0 - scene.a);
   hdr = hdr * shadow + ring;
   hdr += texture(u_bloom, v_uv).rgb * 0.45;
   vec3 c = pow(aces(hdr * 0.85), vec3(1.0 / 2.2));
@@ -785,6 +796,91 @@ void main() {
   o = vec4(c, 1.0);
 }`);
 
+const giProg = program(FULLSCREEN_VS, `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_depth;
+uniform sampler2D u_color;
+uniform mat4 u_proj;
+uniform mat4 u_invProj;
+uniform vec2 u_texel;
+uniform float u_frame;
+out vec4 o;
+vec3 viewPos(vec2 uv) {
+  float d = texture(u_depth, uv).r;
+  vec4 p = u_invProj * vec4(uv * 2.0 - 1.0, d * 2.0 - 1.0, 1.0);
+  return p.xyz / p.w;
+}
+void main() {
+  float d = texture(u_depth, v_uv).r;
+  if (d >= 1.0) { o = vec4(0.0, 0.0, 0.0, 1.0); return; }
+  vec3 P = viewPos(v_uv);
+  vec3 dx = viewPos(v_uv + vec2(u_texel.x, 0.0)) - P;
+  vec3 dx2 = P - viewPos(v_uv - vec2(u_texel.x, 0.0));
+  vec3 dy = viewPos(v_uv + vec2(0.0, u_texel.y)) - P;
+  vec3 dy2 = P - viewPos(v_uv - vec2(0.0, u_texel.y));
+  vec3 N = normalize(cross(abs(dx.z) < abs(dx2.z) ? dx : dx2, abs(dy.z) < abs(dy2.z) ? dy : dy2));
+  if (dot(N, -P) < 0.0) N = -N;
+  vec3 T = normalize(abs(N.y) < 0.99 ? cross(N, vec3(0.0, 1.0, 0.0)) : cross(N, vec3(1.0, 0.0, 0.0)));
+  vec3 B = cross(N, T);
+  float noise = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))) + u_frame);
+  float radius = clamp(-P.z * 0.18, 0.6, 3.0);
+  vec3 gi = vec3(0.0);
+  float occ = 0.0;
+  const int DIRS = 10;
+  const int STEPS = 6;
+  for (int i = 0; i < DIRS; i++) {
+    float a = (float(i) + noise) / float(DIRS) * 6.2831853;
+    float h = fract(noise * 7.13 + float(i) * 0.618034);
+    float st = sqrt(h), ct = sqrt(1.0 - h);
+    vec3 dir = normalize(T * cos(a) * st + B * sin(a) * st + N * ct);
+    for (int s = 1; s <= STEPS; s++) {
+      float f = (float(s) - 0.5 + noise * 0.5) / float(STEPS);
+      float t = radius * f * f + 0.05;
+      vec3 Q = P + dir * t;
+      vec4 c = u_proj * vec4(Q, 1.0);
+      vec2 q = c.xy / c.w * 0.5 + 0.5;
+      if (q.x < 0.0 || q.y < 0.0 || q.x > 1.0 || q.y > 1.0) break;
+      float sd = texture(u_depth, q).r;
+      if (sd >= 1.0) continue;
+      vec3 S = viewPos(q);
+      float gap = S.z - Q.z;
+      if (gap > 0.03 && gap < radius) {
+        float w = 1.0 - f * f;
+        occ += w;
+        gi += texture(u_color, q).rgb * w * ct;
+        break;
+      }
+    }
+  }
+  o = vec4(gi / float(DIRS), clamp(1.0 - occ / float(DIRS) * 1.25, 0.0, 1.0));
+}`);
+const blurProg = program(FULLSCREEN_VS, `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_src;
+uniform sampler2D u_depth;
+uniform vec2 u_dir;
+out vec4 o;
+float lin(vec2 uv) {
+  float d = texture(u_depth, uv).r * 2.0 - 1.0;
+  return 2.0 * 0.1 * 200.0 / (200.0 + 0.1 - d * (200.0 - 0.1));
+}
+void main() {
+  float z0 = lin(v_uv);
+  vec4 sum = vec4(0.0);
+  float wsum = 0.0;
+  for (int i = -5; i <= 5; i++) {
+    vec2 uv = v_uv + u_dir * float(i) * 1.5;
+    float w = exp(-float(i * i) / 12.0) * exp(-abs(lin(uv) - z0) / max(z0 * 0.03, 0.02));
+    sum += texture(u_src, uv) * w;
+    wsum += w;
+  }
+  o = sum / max(wsum, 1e-4);
+}`);
+let frameNo = 0;
+const settings = { gi: true };
+$("gitoggle").onclick = () => { settings.gi = !settings.gi; $("gitoggle").textContent = settings.gi ? "GI on" : "GI off"; };
 const emptyVao = gl.createVertexArray();
 const floatOk = !!gl.getExtension("EXT_color_buffer_float");
 const timerExt = gl.getExtension("EXT_disjoint_timer_query_webgl2");
@@ -813,18 +909,52 @@ function ensureTargets(w, h) {
   targets.w = w; targets.h = h;
   drop(targets.scene);
   for (const b of targets.bloom || []) drop(b);
-  if (targets.ms) { gl.deleteFramebuffer(targets.ms.fbo); gl.deleteRenderbuffer(targets.ms.color); gl.deleteRenderbuffer(targets.ms.depth); }
+  if (targets.ms) {
+    gl.deleteFramebuffer(targets.ms.fbo);
+    for (const rb of [targets.ms.color, targets.ms.albedo, targets.ms.depth]) gl.deleteRenderbuffer(rb);
+  }
+  drop(targets.albedo);
+  for (const g of targets.gi || []) drop(g);
+  if (targets.depth) { gl.deleteFramebuffer(targets.depth.fbo); gl.deleteTexture(targets.depth.tex); }
   const samples = Math.min(4, gl.getParameter(gl.MAX_SAMPLES));
-  const color = gl.createRenderbuffer(), depth = gl.createRenderbuffer(), fbo = gl.createFramebuffer();
+  const color = gl.createRenderbuffer(), albedo = gl.createRenderbuffer(), depth = gl.createRenderbuffer(), fbo = gl.createFramebuffer();
   gl.bindRenderbuffer(gl.RENDERBUFFER, color);
   gl.renderbufferStorageMultisample(gl.RENDERBUFFER, samples, floatOk ? gl.RGBA16F : gl.RGBA8, w, h);
+  gl.bindRenderbuffer(gl.RENDERBUFFER, albedo);
+  gl.renderbufferStorageMultisample(gl.RENDERBUFFER, samples, gl.RGBA8, w, h);
   gl.bindRenderbuffer(gl.RENDERBUFFER, depth);
   gl.renderbufferStorageMultisample(gl.RENDERBUFFER, samples, gl.DEPTH_COMPONENT24, w, h);
   gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
   gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, color);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.RENDERBUFFER, albedo);
   gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth);
-  targets.ms = { fbo, color, depth };
+  targets.ms = { fbo, color, albedo, depth };
   targets.scene = textureTarget(w, h);
+  {
+    const tex = gl.createTexture(), afbo = gl.createFramebuffer();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, afbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    targets.albedo = { fbo: afbo, tex, w, h };
+  }
+  {
+    const tex = gl.createTexture(), dfbo = gl.createFramebuffer();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.DEPTH_COMPONENT24, w, h, 0, gl.DEPTH_COMPONENT, gl.UNSIGNED_INT, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, dfbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, tex, 0);
+    targets.depth = { fbo: dfbo, tex };
+  }
+  targets.gi = [textureTarget(Math.max(1, w >> 1), Math.max(1, h >> 1)), textureTarget(Math.max(1, w >> 1), Math.max(1, h >> 1))];
   targets.bloom = [];
   let bw = w, bh = h;
   for (let i = 0; i < 6 && bw > 8 && bh > 8; i++) {
@@ -989,8 +1119,10 @@ function draw(now) {
 
   gl.bindFramebuffer(gl.FRAMEBUFFER, targets.ms.fbo);
   gl.viewport(0, 0, w, h);
-  gl.clearColor(0, 0, 0, 0);
-  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+  gl.clearBufferfv(gl.COLOR, 0, [0, 0, 0, 0]);
+  gl.clearBufferfv(gl.COLOR, 1, [0, 0, 0, 0]);
+  gl.clearBufferfi(gl.DEPTH_STENCIL, 0, 1, 0);
   lights.sort((p, q) => dot(sub(p.pos, cam.target), sub(p.pos, cam.target)) - dot(sub(q.pos, cam.target), sub(q.pos, cam.target)));
   const lp = new Float32Array(64), lc = new Float32Array(48);
   lights.slice(0, 16).forEach((l, i) => {
@@ -1010,6 +1142,7 @@ function draw(now) {
   gl.uniform1i(gl.getUniformLocation(meshProg, "u_shadow"), 1);
   drawShapes();
 
+  gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.NONE]);
   gl.enable(gl.BLEND);
   gl.depthMask(false);
   if (swarms.size) {
@@ -1051,8 +1184,43 @@ function draw(now) {
   gl.disable(gl.DEPTH_TEST);
 
   gl.bindFramebuffer(gl.READ_FRAMEBUFFER, targets.ms.fbo);
+  gl.readBuffer(gl.COLOR_ATTACHMENT0);
   gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, targets.scene.fbo);
   gl.blitFramebuffer(0, 0, w, h, 0, 0, w, h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+  gl.readBuffer(gl.COLOR_ATTACHMENT1);
+  gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, targets.albedo.fbo);
+  gl.blitFramebuffer(0, 0, w, h, 0, 0, w, h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+  gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, targets.depth.fbo);
+  gl.blitFramebuffer(0, 0, w, h, 0, 0, w, h, gl.DEPTH_BUFFER_BIT, gl.NEAREST);
+  gl.readBuffer(gl.COLOR_ATTACHMENT0);
+
+  const proj = M.perspective(0.9, w / h, 0.1, 200);
+  const [gi0, gi1] = targets.gi;
+  if (settings.gi) {
+  gl.bindFramebuffer(gl.FRAMEBUFFER, gi0.fbo);
+  gl.viewport(0, 0, gi0.w, gi0.h);
+  gl.useProgram(giProg);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, targets.depth.tex);
+  gl.uniform1i(gl.getUniformLocation(giProg, "u_depth"), 0);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, targets.scene.tex);
+  gl.uniform1i(gl.getUniformLocation(giProg, "u_color"), 1);
+  gl.uniformMatrix4fv(gl.getUniformLocation(giProg, "u_proj"), false, proj);
+  gl.uniformMatrix4fv(gl.getUniformLocation(giProg, "u_invProj"), false, invert(proj));
+  gl.uniform2f(gl.getUniformLocation(giProg, "u_texel"), 1 / w, 1 / h);
+  gl.uniform1f(gl.getUniformLocation(giProg, "u_frame"), (frameNo++ % 64) / 64);
+  gl.bindVertexArray(emptyVao);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  for (const [src, dst, dir] of [[gi0, gi1, [1, 0]], [gi1, gi0, [0, 1]]]) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, dst.fbo);
+    gl.useProgram(blurProg);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src.tex);
+    gl.uniform1i(gl.getUniformLocation(blurProg, "u_src"), 0);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, targets.depth.tex);
+    gl.uniform1i(gl.getUniformLocation(blurProg, "u_depth"), 1);
+    gl.uniform2f(gl.getUniformLocation(blurProg, "u_dir"), dir[0] / gi0.w, dir[1] / gi0.h);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+  }
 
   const chain = targets.bloom;
   fullscreen(prefilterProg, targets.scene.tex, chain[0].fbo, chain[0].w, chain[0].h);
@@ -1072,6 +1240,14 @@ function draw(now) {
   gl.activeTexture(gl.TEXTURE1);
   gl.bindTexture(gl.TEXTURE_2D, chain[0].tex);
   gl.uniform1i(gl.getUniformLocation(compositeProg, "u_bloom"), 1);
+  gl.activeTexture(gl.TEXTURE2);
+  gl.bindTexture(gl.TEXTURE_2D, targets.gi[0].tex);
+  gl.uniform1i(gl.getUniformLocation(compositeProg, "u_gi"), 2);
+  gl.activeTexture(gl.TEXTURE3);
+  gl.bindTexture(gl.TEXTURE_2D, targets.albedo.tex);
+  gl.uniform1i(gl.getUniformLocation(compositeProg, "u_albedo"), 3);
+  gl.uniform1f(gl.getUniformLocation(compositeProg, "u_giStrength"), 2.2);
+  gl.uniform1f(gl.getUniformLocation(compositeProg, "u_giOn"), settings.gi ? 1 : 0);
   gl.uniformMatrix4fv(gl.getUniformLocation(compositeProg, "u_inv"), false, invert(vp));
   gl.uniform3fv(gl.getUniformLocation(compositeProg, "u_eye"), eye);
   gl.uniform1f(gl.getUniformLocation(compositeProg, "u_aspect"), w / h);
