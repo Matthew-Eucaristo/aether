@@ -827,7 +827,7 @@ void main() {
   float radius = clamp(-P.z * 0.18, 0.6, 3.0);
   vec3 gi = vec3(0.0);
   float occ = 0.0;
-  const int DIRS = 10;
+  const int DIRS = 6;
   const int STEPS = 6;
   for (int i = 0; i < DIRS; i++) {
     float a = (float(i) + noise) / float(DIRS) * 6.2831853;
@@ -878,9 +878,40 @@ void main() {
   }
   o = sum / max(wsum, 1e-4);
 }`);
+const temporalProg = program(FULLSCREEN_VS, `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_cur;
+uniform sampler2D u_hist;
+uniform sampler2D u_depth;
+uniform mat4 u_invVP;
+uniform mat4 u_prevVP;
+uniform vec2 u_texel;
+uniform float u_keep;
+out vec4 o;
+void main() {
+  vec4 c = texture(u_cur, v_uv);
+  float d = texture(u_depth, v_uv).r;
+  if (d >= 1.0 || u_keep <= 0.0) { o = c; return; }
+  vec4 wp = u_invVP * vec4(v_uv * 2.0 - 1.0, d * 2.0 - 1.0, 1.0);
+  vec4 pp = u_prevVP * vec4(wp.xyz / wp.w, 1.0);
+  vec2 puv = pp.xy / pp.w * 0.5 + 0.5;
+  if (puv.x < 0.0 || puv.y < 0.0 || puv.x > 1.0 || puv.y > 1.0) { o = c; return; }
+  vec4 m1 = vec4(0.0), m2 = vec4(0.0);
+  for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {
+    vec4 s = texture(u_cur, v_uv + vec2(x, y) * u_texel);
+    m1 += s; m2 += s * s;
+  }
+  m1 /= 9.0;
+  vec4 sigma = sqrt(max(m2 / 9.0 - m1 * m1, 0.0)) * 1.5;
+  vec4 h = clamp(texture(u_hist, puv), m1 - sigma, m1 + sigma);
+  o = mix(c, h, u_keep);
+}`);
 let frameNo = 0;
+let prevVP = null;
+let histValid = false;
 const settings = { gi: true };
-$("gitoggle").onclick = () => { settings.gi = !settings.gi; $("gitoggle").textContent = settings.gi ? "GI on" : "GI off"; };
+$("gitoggle").onclick = () => { settings.gi = !settings.gi; histValid = false; $("gitoggle").textContent = settings.gi ? "GI on" : "GI off"; };
 const emptyVao = gl.createVertexArray();
 const floatOk = !!gl.getExtension("EXT_color_buffer_float");
 const timerExt = gl.getExtension("EXT_disjoint_timer_query_webgl2");
@@ -914,7 +945,7 @@ function ensureTargets(w, h) {
     for (const rb of [targets.ms.color, targets.ms.albedo, targets.ms.depth]) gl.deleteRenderbuffer(rb);
   }
   drop(targets.albedo);
-  for (const g of targets.gi || []) drop(g);
+  for (const g of [...(targets.gi || []), ...(targets.hist || [])]) drop(g);
   if (targets.depth) { gl.deleteFramebuffer(targets.depth.fbo); gl.deleteTexture(targets.depth.tex); }
   const samples = Math.min(4, gl.getParameter(gl.MAX_SAMPLES));
   const color = gl.createRenderbuffer(), albedo = gl.createRenderbuffer(), depth = gl.createRenderbuffer(), fbo = gl.createFramebuffer();
@@ -954,7 +985,10 @@ function ensureTargets(w, h) {
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, tex, 0);
     targets.depth = { fbo: dfbo, tex };
   }
-  targets.gi = [textureTarget(Math.max(1, w >> 1), Math.max(1, h >> 1)), textureTarget(Math.max(1, w >> 1), Math.max(1, h >> 1))];
+  const half = () => textureTarget(Math.max(1, w >> 1), Math.max(1, h >> 1));
+  targets.gi = [half(), half()];
+  targets.hist = [half(), half()];
+  histValid = false;
   targets.bloom = [];
   let bw = w, bh = h;
   for (let i = 0; i < 6 && bw > 8 && bh > 8; i++) {
@@ -1210,7 +1244,23 @@ function draw(now) {
   gl.uniform1f(gl.getUniformLocation(giProg, "u_frame"), (frameNo++ % 64) / 64);
   gl.bindVertexArray(emptyVao);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
-  for (const [src, dst, dir] of [[gi0, gi1, [1, 0]], [gi1, gi0, [0, 1]]]) {
+  const [hist, histOut] = frameNo & 1 ? targets.hist : [targets.hist[1], targets.hist[0]];
+  gl.bindFramebuffer(gl.FRAMEBUFFER, histOut.fbo);
+  gl.useProgram(temporalProg);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, gi0.tex);
+  gl.uniform1i(gl.getUniformLocation(temporalProg, "u_cur"), 0);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, hist.tex);
+  gl.uniform1i(gl.getUniformLocation(temporalProg, "u_hist"), 1);
+  gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, targets.depth.tex);
+  gl.uniform1i(gl.getUniformLocation(temporalProg, "u_depth"), 2);
+  gl.uniformMatrix4fv(gl.getUniformLocation(temporalProg, "u_invVP"), false, invert(vp));
+  gl.uniformMatrix4fv(gl.getUniformLocation(temporalProg, "u_prevVP"), false, prevVP || vp);
+  gl.uniform2f(gl.getUniformLocation(temporalProg, "u_texel"), 1 / gi0.w, 1 / gi0.h);
+  gl.uniform1f(gl.getUniformLocation(temporalProg, "u_keep"), histValid ? 0.92 : 0);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  histValid = true;
+  prevVP = vp;
+  for (const [src, dst, dir] of [[histOut, gi1, [1, 0]], [gi1, gi0, [0, 1]]]) {
     gl.bindFramebuffer(gl.FRAMEBUFFER, dst.fbo);
     gl.useProgram(blurProg);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src.tex);
