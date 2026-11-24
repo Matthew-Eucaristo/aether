@@ -148,6 +148,27 @@ fn load_blobs(dir: &Path) -> Result<Blobs, StoreError> {
     Ok(blobs)
 }
 
+fn rules_number(rules: &str) -> Option<u32> {
+    rules.strip_prefix("aether-rules/")?.parse().ok()
+}
+
+fn upgrade_snapshot(json: &mut serde_json::Value, from: &str) -> Result<(), String> {
+    rules_number(from).ok_or_else(|| format!("unknown rules {from:?}"))?;
+    let state = json
+        .as_object_mut()
+        .ok_or("the snapshot is not an object")?;
+    state
+        .entry("signals")
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    let law = state
+        .get_mut("law")
+        .and_then(|l| l.as_object_mut())
+        .ok_or("the snapshot has no law")?;
+    law.entry("region_fuel_per_tick")
+        .or_insert_with(|| Law::default().region_fuel_per_tick.into());
+    Ok(())
+}
+
 pub struct Store {
     _lock: File,
     dir: PathBuf,
@@ -185,12 +206,6 @@ impl Store {
 
     fn open_locked(dir: PathBuf, held: File) -> Result<Store, StoreError> {
         let blobs = load_blobs(&dir.join(BLOBS))?;
-        let snapshot = dir.join(SNAPSHOT);
-        let state: State = serde_json::from_slice(&fs::read(&snapshot).at(&snapshot)?)
-            .map_err(|e| corrupt(&snapshot, e))?;
-        let mut kernel = Kernel::from_state(state, blobs)?;
-        let mut head = kernel.state_hash();
-
         let path = dir.join(JOURNAL);
         let bytes = fs::read(&path).at(&path)?;
         let lines: Vec<&[u8]> = bytes.split_inclusive(|b| *b == b'\n').collect();
@@ -204,6 +219,17 @@ impl Store {
                     .to_owned(),
             ),
         };
+
+        let snapshot = dir.join(SNAPSHOT);
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&fs::read(&snapshot).at(&snapshot)?)
+                .map_err(|e| corrupt(&snapshot, e))?;
+        if let Some(older) = rules.as_deref().filter(|r| *r != RULES) {
+            upgrade_snapshot(&mut json, older).map_err(|e| corrupt(&snapshot, e))?;
+        }
+        let state: State = serde_json::from_value(json).map_err(|e| corrupt(&snapshot, e))?;
+        let mut kernel = Kernel::from_state(state, blobs)?;
+        let mut head = kernel.state_hash();
         let mut valid = if rules.is_some() { lines[0].len() } else { 0 };
         for (n, line) in lines.iter().enumerate().skip(1) {
             let record = line

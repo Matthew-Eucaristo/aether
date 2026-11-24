@@ -302,6 +302,43 @@ fn journals_from_other_rules_are_refused_until_checkpointed() {
 }
 
 #[test]
+fn snapshots_from_older_rules_are_upgraded_and_current_ones_stay_strict() {
+    let mut p = Pair::create("upgrade");
+    p.run(3);
+    p.store().checkpoint().unwrap();
+    let dir = p.close().to_path_buf();
+    let snapshot = dir.join("snapshot.json");
+    let mut json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&snapshot).unwrap()).unwrap();
+    json.as_object_mut().unwrap().remove("signals");
+    json["law"]
+        .as_object_mut()
+        .unwrap()
+        .remove("region_fuel_per_tick");
+    fs::write(&snapshot, serde_json::to_vec(&json).unwrap()).unwrap();
+    assert!(
+        matches!(Store::open(&dir), Err(StoreError::Corrupt { .. })),
+        "a current-rules snapshot missing fields is corrupt"
+    );
+    let journal = dir.join("journal.log");
+    let header = fs::read_to_string(&journal).unwrap();
+    fs::write(&journal, header.replacen(RULES, "aether-rules/4", 1)).unwrap();
+    let mut store = Store::open(&dir).unwrap();
+    assert_eq!(
+        store.kernel().state().law.region_fuel_per_tick,
+        Law::default().region_fuel_per_tick
+    );
+    store.step(Vec::new()).unwrap();
+    store.checkpoint().unwrap();
+    drop(store);
+    assert_eq!(
+        lines(&journal),
+        vec![format!("aether-journal rules={RULES}")]
+    );
+    Store::open(&dir).unwrap();
+}
+
+#[test]
 fn a_journal_without_a_header_is_rejected() {
     let mut p = Pair::create("headless");
     p.run(3);
