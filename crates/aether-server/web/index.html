@@ -439,6 +439,9 @@ uniform vec3 u_lc[16];
 uniform vec3 u_sun;
 uniform mat4 u_lvp;
 uniform sampler2DShadow u_shadow;
+uniform sampler2DShadow u_pshadow;
+uniform mat4 u_pvp[24];
+uniform int u_nps;
 layout(location=0) out vec4 o;
 layout(location=1) out vec4 o_albedo;
 float sunVisibility(vec3 w, vec3 n) {
@@ -451,6 +454,26 @@ float sunVisibility(vec3 w, vec3 n) {
     for (int y = -2; y <= 2; y++)
       sum += texture(u_shadow, vec3(s.xy + vec2(x, y) * texel * 1.2, s.z - 0.0012));
   return sum / 25.0;
+}
+float pointVisibility(int i, vec3 w, vec3 n, vec3 L) {
+  vec3 d = w - L;
+  float r = length(d);
+  vec3 q = w + n * (0.02 + 0.006 * r);
+  d = q - L;
+  vec3 a = abs(d);
+  int face = a.x >= a.y && a.x >= a.z ? (d.x > 0.0 ? 0 : 1) : a.y >= a.z ? (d.y > 0.0 ? 2 : 3) : (d.z > 0.0 ? 4 : 5);
+  vec4 c = u_pvp[i * 6 + face] * vec4(q, 1.0);
+  vec3 s = c.xyz / c.w * 0.5 + 0.5;
+  if (s.z >= 1.0) return 1.0;
+  vec2 tiles = vec2(6.0, 4.0);
+  vec2 texel = 1.0 / vec2(textureSize(u_pshadow, 0));
+  vec2 lo = (vec2(float(face), float(i)) + 0.02) / tiles, hi = (vec2(float(face), float(i)) + 0.98) / tiles;
+  vec2 uv = (vec2(float(face), float(i)) + s.xy) / tiles;
+  float sum = 0.0;
+  for (int x = -1; x <= 1; x++)
+    for (int y = -1; y <= 1; y++)
+      sum += texture(u_pshadow, vec3(clamp(uv + vec2(x, y) * texel * 1.5, lo, hi), s.z - 0.0004));
+  return sum / 9.0;
 }
 void main() {
   vec3 n = normalize(v_nrm);
@@ -466,6 +489,7 @@ void main() {
     float d2 = dot(L, L);
     L *= inversesqrt(max(d2, 1e-4));
     float att = u_lp[i].w / (1.0 + d2);
+    if (i < u_nps && att > 0.002) att *= pointVisibility(i, v_world, n, u_lp[i].xyz);
     light += u_lc[i] * max(dot(n, L), 0.0) * att;
     spec += u_lc[i] * pow(max(dot(n, normalize(L + V)), 0.0), 48.0) * att * 0.5;
   }
@@ -675,8 +699,8 @@ function frameScene(now) {
     const glow = num(e, "glow") ?? 0;
     if (!swarms.has(id) || shape !== "sphere" || text(e, "look") === "blackhole") pushInstance(SHAPES[shape], p, scl, rot, color, glow);
     const lum = num(e, "light") ?? 0;
-    if (lum > 0) lights.push({ pos: toGL(p), color, lum });
     const reach = Math.max(...scl.map(Math.abs)) * (shape === "sphere" ? 1 : 0.6);
+    if (lum > 0) lights.push({ pos: toGL(p), color, lum, radius: reach });
     ents.push({ kind: "entity", id, pos: toGL(p), radius: Math.max(0.08, Math.min(reach, 6)), color, m, shape, center: p, scl, rot });
   }
   const ids = capsuleIds();
@@ -916,6 +940,8 @@ const emptyVao = gl.createVertexArray();
 const floatOk = !!gl.getExtension("EXT_color_buffer_float");
 const timerExt = gl.getExtension("EXT_disjoint_timer_query_webgl2");
 const SHADOW_SIZE = 2048;
+const POINT_TILE = 512, POINT_SHADOWS = 4;
+const CUBE_FACES = [[[1, 0, 0], [0, 1, 0]], [[-1, 0, 0], [0, 1, 0]], [[0, 1, 0], [0, 0, 1]], [[0, -1, 0], [0, 0, 1]], [[0, 0, 1], [0, 1, 0]], [[0, 0, -1], [0, 1, 0]]];
 const targets = { w: 0, h: 0 };
 
 function colorTexture(w, h) {
@@ -1011,6 +1037,23 @@ function ensureTargets(w, h) {
     gl.drawBuffers([gl.NONE]);
     gl.readBuffer(gl.NONE);
     targets.shadow = { fbo: sfbo, tex };
+  }
+  if (!targets.pshadow) {
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.DEPTH_COMPONENT24, POINT_TILE * 6, POINT_TILE * POINT_SHADOWS, 0, gl.DEPTH_COMPONENT, gl.UNSIGNED_INT, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_MODE, gl.COMPARE_REF_TO_TEXTURE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_FUNC, gl.LEQUAL);
+    const pfbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, pfbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, tex, 0);
+    gl.drawBuffers([gl.NONE]);
+    gl.readBuffer(gl.NONE);
+    targets.pshadow = { fbo: pfbo, tex };
   }
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 }
@@ -1149,6 +1192,26 @@ function draw(now) {
   gl.useProgram(shadowProg);
   gl.uniformMatrix4fv(gl.getUniformLocation(shadowProg, "u_vp"), false, lvp);
   drawShapes();
+
+  lights.sort((p, q) => dot(sub(p.pos, cam.target), sub(p.pos, cam.target)) - dot(sub(q.pos, cam.target), sub(q.pos, cam.target)));
+  const nps = Math.min(POINT_SHADOWS, lights.length);
+  const pvp = new Float32Array(16 * 6 * POINT_SHADOWS);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, targets.pshadow.fbo);
+  gl.viewport(0, 0, POINT_TILE * 6, POINT_TILE * POINT_SHADOWS);
+  gl.clear(gl.DEPTH_BUFFER_BIT);
+  gl.polygonOffset(1.5, 2);
+  for (let i = 0; i < nps; i++) {
+    const l = lights[i];
+    const far = Math.min(80, Math.sqrt(l.lum / 0.002));
+    const proj = M.perspective(2 * Math.atan(1.06), 1, Math.max(0.05, l.radius * 1.05), far);
+    CUBE_FACES.forEach(([dir, up], f) => {
+      const m = M.mul(proj, M.lookAt(l.pos, add(l.pos, dir), up));
+      pvp.set(m, (i * 6 + f) * 16);
+      gl.viewport(f * POINT_TILE, i * POINT_TILE, POINT_TILE, POINT_TILE);
+      gl.uniformMatrix4fv(gl.getUniformLocation(shadowProg, "u_vp"), false, m);
+      drawShapes();
+    });
+  }
   gl.disable(gl.POLYGON_OFFSET_FILL);
 
   gl.bindFramebuffer(gl.FRAMEBUFFER, targets.ms.fbo);
@@ -1157,7 +1220,6 @@ function draw(now) {
   gl.clearBufferfv(gl.COLOR, 0, [0, 0, 0, 0]);
   gl.clearBufferfv(gl.COLOR, 1, [0, 0, 0, 0]);
   gl.clearBufferfi(gl.DEPTH_STENCIL, 0, 1, 0);
-  lights.sort((p, q) => dot(sub(p.pos, cam.target), sub(p.pos, cam.target)) - dot(sub(q.pos, cam.target), sub(q.pos, cam.target)));
   const lp = new Float32Array(64), lc = new Float32Array(48);
   lights.slice(0, 16).forEach((l, i) => {
     lp.set([...l.pos, l.lum], i * 4);
@@ -1174,6 +1236,11 @@ function draw(now) {
   gl.activeTexture(gl.TEXTURE1);
   gl.bindTexture(gl.TEXTURE_2D, targets.shadow.tex);
   gl.uniform1i(gl.getUniformLocation(meshProg, "u_shadow"), 1);
+  gl.activeTexture(gl.TEXTURE2);
+  gl.bindTexture(gl.TEXTURE_2D, targets.pshadow.tex);
+  gl.uniform1i(gl.getUniformLocation(meshProg, "u_pshadow"), 2);
+  gl.uniformMatrix4fv(gl.getUniformLocation(meshProg, "u_pvp"), false, pvp);
+  gl.uniform1i(gl.getUniformLocation(meshProg, "u_nps"), nps);
   drawShapes();
 
   gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.NONE]);
