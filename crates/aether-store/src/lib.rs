@@ -153,7 +153,13 @@ fn rules_number(rules: &str) -> Option<u32> {
 }
 
 fn upgrade_snapshot(json: &mut serde_json::Value, from: &str) -> Result<(), String> {
-    rules_number(from).ok_or_else(|| format!("unknown rules {from:?}"))?;
+    let number = rules_number(from).ok_or_else(|| format!("unknown rules {from:?}"))?;
+    let current = rules_number(RULES).expect("the kernel's rules are numbered");
+    if number > current {
+        return Err(format!(
+            "rules {from:?} are newer than this kernel's {RULES:?}"
+        ));
+    }
     let state = json
         .as_object_mut()
         .ok_or("the snapshot is not an object")?;
@@ -169,6 +175,20 @@ fn upgrade_snapshot(json: &mut serde_json::Value, from: &str) -> Result<(), Stri
     Ok(())
 }
 
+fn holds_a_world(dir: &Path) -> bool {
+    if dir.join(SNAPSHOT).exists() {
+        return true;
+    }
+    if let Ok(bytes) = fs::read(dir.join(JOURNAL))
+        && bytes.iter().filter(|b| **b == b'\n').count() > 1
+    {
+        return true;
+    }
+    fs::read_dir(dir.join(BLOBS))
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false)
+}
+
 pub struct Store {
     _lock: File,
     dir: PathBuf,
@@ -182,14 +202,14 @@ impl Store {
     pub fn create(dir: impl Into<PathBuf>, law: Law, seed: u64) -> Result<Store, StoreError> {
         let dir = dir.into();
         let snapshot = dir.join(SNAPSHOT);
-        if snapshot.exists() {
+        if holds_a_world(&dir) {
             return Err(StoreError::Exists(dir));
         }
         let blobs = dir.join(BLOBS);
         fs::create_dir_all(&blobs).at(&blobs)?;
         sync_dir(&dir)?;
         let held = lock(&dir)?;
-        if snapshot.exists() {
+        if holds_a_world(&dir) {
             return Err(StoreError::Exists(dir));
         }
         write_atomic(&dir.join(JOURNAL), &header())?;

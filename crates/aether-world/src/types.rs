@@ -53,13 +53,31 @@ pub enum Owner {
     Capsule(CapsuleId),
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Value {
     Num(f64),
     Text(String),
     Bool(bool),
     Nums(Arc<[f64]>),
+}
+
+/// Values are equal only when they are bit-identical, as the state hash sees them: 0.0 and -0.0 differ.
+impl PartialEq for Value {
+    fn eq(&self, other: &Value) -> bool {
+        match (self, other) {
+            (Value::Num(a), Value::Num(b)) => a.to_bits() == b.to_bits(),
+            (Value::Text(a), Value::Text(b)) => a == b,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Nums(a), Value::Nums(b)) => {
+                a.len() == b.len()
+                    && a.iter()
+                        .zip(b.iter())
+                        .all(|(x, y)| x.to_bits() == y.to_bits())
+            }
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
