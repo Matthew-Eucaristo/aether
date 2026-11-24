@@ -245,6 +245,7 @@ impl Kernel {
                 .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
         });
         self.journal.ticks.push(inputs);
+        self.state.world.settle();
         TickReport {
             tick,
             inputs: outcomes,

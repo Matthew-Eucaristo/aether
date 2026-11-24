@@ -38,41 +38,109 @@ impl Digest {
             };
         }
     }
+
+    fn merge(&mut self, other: &Digest) {
+        for (lane, v) in self.0.iter_mut().zip(other.0.iter()) {
+            *lane = lane.wrapping_add(*v);
+        }
+    }
+
+    fn of_changes(changes: &[(EntityId, Option<&Entity>, Option<&Entity>)]) -> Digest {
+        let mut d = Digest::default();
+        for (id, old, new) in changes {
+            if old == new {
+                continue;
+            }
+            if let Some(old) = old {
+                d.apply(*id, old, false);
+            }
+            if let Some(new) = new {
+                d.apply(*id, new, true);
+            }
+        }
+        d
+    }
 }
+
+const PARALLEL_FROM: usize = 256;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Derived {
     digest: Digest,
+    stale: BTreeMap<EntityId, Option<Entity>>,
     by_key: BTreeMap<String, BTreeSet<EntityId>>,
     usage: BTreeMap<Owner, Usage>,
 }
 
 impl Derived {
-    fn add(&mut self, id: EntityId, entity: &Entity) {
-        self.digest.apply(id, entity, true);
-        for key in entity.components.keys() {
-            self.by_key.entry(key.clone()).or_default().insert(id);
+    fn index(&mut self, key: &str, id: EntityId, present: bool) {
+        if present {
+            match self.by_key.get_mut(key) {
+                Some(ids) => {
+                    ids.insert(id);
+                }
+                None => {
+                    self.by_key.insert(key.to_owned(), BTreeSet::from([id]));
+                }
+            }
+        } else if let Some(ids) = self.by_key.get_mut(key) {
+            ids.remove(&id);
+            if ids.is_empty() {
+                self.by_key.remove(key);
+            }
         }
-        let usage = self.usage.entry(entity.owner.clone()).or_default();
-        usage.entities += 1;
-        usage.bytes += entity_bytes(entity);
     }
 
-    fn remove(&mut self, id: EntityId, entity: &Entity) {
-        self.digest.apply(id, entity, false);
-        for key in entity.components.keys() {
-            if let Some(ids) = self.by_key.get_mut(key) {
-                ids.remove(&id);
-                if ids.is_empty() {
-                    self.by_key.remove(key);
+    fn count(&mut self, owner: &Owner, entities: i64, bytes: i64) {
+        if !self.usage.contains_key(owner) {
+            self.usage.insert(owner.clone(), Usage::default());
+        }
+        let usage = self.usage.get_mut(owner).expect("inserted above");
+        usage.entities = usage.entities.wrapping_add_signed(entities);
+        usage.bytes = usage.bytes.wrapping_add_signed(bytes);
+        if usage.entities == 0 {
+            self.usage.remove(owner);
+        }
+    }
+
+    fn change(&mut self, id: EntityId, old: Option<&Entity>, new: Option<&Entity>) {
+        let empty = BTreeMap::new();
+        let before = old.map_or(&empty, |e| &e.components);
+        let after = new.map_or(&empty, |e| &e.components);
+        let (mut a, mut b) = (before.keys().peekable(), after.keys().peekable());
+        loop {
+            match (a.peek(), b.peek()) {
+                (None, None) => break,
+                (Some(x), Some(y)) if x == y => {
+                    a.next();
+                    b.next();
+                }
+                (Some(x), Some(y)) if x < y => {
+                    let x = (*x).clone();
+                    a.next();
+                    self.index(&x, id, false);
+                }
+                (Some(_), None) => {
+                    let x = a.next().expect("peeked").clone();
+                    self.index(&x, id, false);
+                }
+                _ => {
+                    let y = b.next().expect("peeked").clone();
+                    self.index(&y, id, true);
                 }
             }
         }
-        if let Some(usage) = self.usage.get_mut(&entity.owner) {
-            usage.entities -= 1;
-            usage.bytes -= entity_bytes(entity);
-            if usage.entities == 0 {
-                self.usage.remove(&entity.owner);
+        match (old, new) {
+            (Some(o), Some(n)) if o.owner == n.owner => {
+                self.count(&n.owner, 0, entity_bytes(n) as i64 - entity_bytes(o) as i64);
+            }
+            _ => {
+                if let Some(o) = old {
+                    self.count(&o.owner, -1, -(entity_bytes(o) as i64));
+                }
+                if let Some(n) = new {
+                    self.count(&n.owner, 1, entity_bytes(n) as i64);
+                }
             }
         }
     }
@@ -100,15 +168,18 @@ impl From<WorldData<BTreeMap<EntityId, Entity>>> for World {
     fn from(d: WorldData<BTreeMap<EntityId, Entity>>) -> Self {
         let mut derived = Derived::default();
         for (id, entity) in &d.entities {
-            derived.add(*id, entity);
+            derived.change(*id, None, Some(entity));
+            derived.stale.insert(*id, None);
         }
-        World {
+        let mut world = World {
             tick: d.tick,
             version: d.version,
             next_entity: d.next_entity,
             entities: d.entities,
             derived,
-        }
+        };
+        world.settle();
+        world
     }
 }
 
@@ -184,18 +255,13 @@ impl World {
         }
         let touched = overlay.keys().copied().collect();
         for (id, slot) in overlay {
-            if let Some(old) = self.entities.get(&id) {
-                self.derived.remove(id, old);
-            }
-            match slot {
-                Some(entity) => {
-                    self.derived.add(id, &entity);
-                    self.entities.insert(id, entity);
-                }
-                None => {
-                    self.entities.remove(&id);
-                }
-            }
+            self.derived
+                .change(id, self.entities.get(&id), slot.as_ref());
+            let old = match slot {
+                Some(entity) => self.entities.insert(id, entity),
+                None => self.entities.remove(&id),
+            };
+            self.derived.stale.entry(id).or_insert(old);
         }
         self.next_entity = next_entity;
         self.version += 1;
@@ -218,7 +284,43 @@ impl World {
         Ok(())
     }
 
+    pub fn settle(&mut self) {
+        if self.derived.stale.is_empty() {
+            return;
+        }
+        let stale = std::mem::take(&mut self.derived.stale);
+        let changes: Vec<(EntityId, Option<&Entity>, Option<&Entity>)> = stale
+            .iter()
+            .map(|(id, old)| (*id, old.as_ref(), self.entities.get(id)))
+            .collect();
+        let threads = std::thread::available_parallelism()
+            .map_or(1, |n| n.get())
+            .min(changes.len() / PARALLEL_FROM)
+            .max(1);
+        let delta = if threads == 1 {
+            Digest::of_changes(&changes)
+        } else {
+            let per = changes.len().div_ceil(threads);
+            std::thread::scope(|s| {
+                let parts: Vec<_> = changes
+                    .chunks(per)
+                    .map(|part| s.spawn(move || Digest::of_changes(part)))
+                    .collect();
+                let mut total = Digest::default();
+                for part in parts {
+                    total.merge(&part.join().expect("hashing does not panic"));
+                }
+                total
+            })
+        };
+        self.derived.digest.merge(&delta);
+    }
+
     pub fn hash(&self) -> [u8; 32] {
+        assert!(
+            self.derived.stale.is_empty(),
+            "settle the world before hashing it"
+        );
         let mut h = blake3::Hasher::new();
         h.update(b"aether-world/v2");
         h.update(&self.tick.to_le_bytes());

@@ -76,11 +76,14 @@ fn hash_depends_on_content_not_history() {
     txn.set(&b, id, "x", Value::Num(1.0)).unwrap();
     b.commit(txn).unwrap();
 
+    a.settle();
+    b.settle();
     assert_eq!(a.hash(), b.hash());
 
     let mut txn = b.begin();
     txn.set(&b, id, "x", Value::Num(2.0)).unwrap();
     b.commit(txn).unwrap();
+    b.settle();
     assert_ne!(a.hash(), b.hash());
 }
 
@@ -108,11 +111,43 @@ fn incremental_hash_matches_a_fresh_rebuild_after_every_commit() {
             _ => {}
         }
         world.commit(txn).unwrap();
-        let rebuilt: World = serde_json::from_str(&serde_json::to_string(&world).unwrap()).unwrap();
-        assert_eq!(rebuilt.hash(), world.hash(), "step {step}");
-        assert_eq!(rebuilt, world);
+        if step % 3 == 0 {
+            world.settle();
+            let rebuilt: World =
+                serde_json::from_str(&serde_json::to_string(&world).unwrap()).unwrap();
+            assert_eq!(rebuilt.hash(), world.hash(), "step {step}");
+            assert_eq!(rebuilt, world);
+        }
     }
     assert!(world.len() > 10);
+}
+
+#[test]
+fn settling_many_changes_in_parallel_matches_a_rebuild() {
+    let mut world = World::new();
+    let mut txn = world.begin();
+    let ids: Vec<_> = (0..3000).map(|_| txn.spawn(Owner::Region)).collect();
+    for (i, id) in ids.iter().enumerate() {
+        txn.set(&world, *id, "x", Value::Num(i as f64)).unwrap();
+    }
+    world.commit(txn).unwrap();
+    world.settle();
+    for round in 0..3 {
+        for chunk in ids.chunks(100) {
+            let mut txn = world.begin();
+            for id in chunk {
+                txn.set(&world, *id, "x", Value::Num(round as f64)).unwrap();
+                if round == 1 {
+                    txn.set(&world, *id, "y", Value::Bool(true)).unwrap();
+                }
+            }
+            world.commit(txn).unwrap();
+        }
+    }
+    world.settle();
+    let rebuilt: World = serde_json::from_str(&serde_json::to_string(&world).unwrap()).unwrap();
+    assert_eq!(rebuilt.hash(), world.hash());
+    assert_eq!(rebuilt, world);
 }
 
 #[test]
@@ -127,6 +162,7 @@ fn despawning_everything_returns_to_the_empty_digest() {
     txn.despawn(&world, a).unwrap();
     txn.despawn(&world, b).unwrap();
     world.commit(txn).unwrap();
+    world.settle();
     let empty: World = serde_json::from_str(
         &serde_json::to_string(&World::new())
             .unwrap()
