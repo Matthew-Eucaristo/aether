@@ -1,9 +1,9 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use aether_world::{CapsuleId, EntityId, Owner, PlayerId, Txn, Usage, World};
 use serde::{Deserialize, Serialize};
-use wasmtime::{Store, StoreLimitsBuilder, Trap};
+use wasmtime::{Instance, Store, StoreLimitsBuilder, Trap, Val};
 
 use crate::blob::{BlobHash, Blobs};
 use crate::canon::Canon;
@@ -11,8 +11,8 @@ use crate::capsule::{Cap, Capsule, Status, claim_slot};
 use crate::host::{HostError, HostState, splitmix64};
 use crate::input::{Action, Actor, Input, InputOutcome};
 use crate::law::Law;
-use crate::meter::{DEPTH_EXPORT, DEPTH_LIMIT};
-use crate::runtime::{Runtime, THREAD_STACK};
+use crate::meter::{DEPTH_EXPORT, DEPTH_LIMIT, Init, MEMORY_EXPORT, Reset};
+use crate::runtime::{Runtime, TABLE_ELEMENTS, THREAD_STACK};
 use crate::signal::{Sender, Signal};
 
 const LOG_BYTES_PER_TICK: usize = 1024;
@@ -79,6 +79,41 @@ pub struct Kernel {
     runtime: Runtime,
     journal: Journal,
     delivering: Vec<Signal>,
+    live: HashMap<CapsuleId, Live>,
+}
+
+struct Live {
+    wasm: BlobHash,
+    memory_bytes: u64,
+    store: Store<HostState>,
+    instance: Instance,
+}
+
+fn reset(store: &mut Store<HostState>, instance: &Instance, r: &Reset) -> Option<()> {
+    if let Some(pages) = r.pages {
+        let memory = instance.get_memory(&mut *store, MEMORY_EXPORT)?;
+        if memory.size(&*store) != pages {
+            return None;
+        }
+        memory.data_mut(&mut *store).fill(0);
+        for (at, bytes) in &r.data {
+            memory.write(&mut *store, *at as usize, bytes).ok()?;
+        }
+    }
+    for (name, init) in &r.globals {
+        let value = match *init {
+            Init::I32(v) => Val::I32(v),
+            Init::I64(v) => Val::I64(v),
+            Init::F32(v) => Val::F32(v),
+            Init::F64(v) => Val::F64(v),
+            Init::V128(v) => Val::V128(v.into()),
+        };
+        instance
+            .get_global(&mut *store, name)?
+            .set(&mut *store, value)
+            .ok()?;
+    }
+    Some(())
 }
 
 impl Kernel {
@@ -114,6 +149,7 @@ impl Kernel {
             runtime,
             journal,
             delivering: Vec::new(),
+            live: HashMap::new(),
         })
     }
 
@@ -245,6 +281,12 @@ impl Kernel {
                 .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
         });
         self.journal.ticks.push(inputs);
+        self.live.retain(|id, l| {
+            self.state
+                .capsules
+                .get(id)
+                .is_some_and(|c| c.wasm == l.wasm && c.status == Status::Active)
+        });
         self.state.world.settle();
         TickReport {
             tick,
@@ -635,17 +677,50 @@ impl Kernel {
                 .instances(1)
                 .memories(1)
                 .tables(1)
-                .table_elements(10_000)
+                .table_elements(TABLE_ELEMENTS)
                 .build(),
         };
-        let mut store = Store::new(self.runtime.engine(), host);
-        store.limiter(|s| &mut s.limits);
-        store
-            .set_fuel(u64::MAX)
-            .expect("fuel metering is enabled in the engine config");
+        let cached = self.live.remove(&id).filter(|l| {
+            l.wasm == capsule.wasm
+                && l.memory_bytes == budget.memory_bytes
+                && prepared.reset.is_some()
+        });
+        let (mut store, instance) = match cached {
+            Some(mut live) => {
+                *live.store.data_mut() = host;
+                let reset_ok = reset(
+                    &mut live.store,
+                    &live.instance,
+                    prepared.reset.as_ref().expect("filtered above"),
+                );
+                match reset_ok {
+                    Some(()) => (live.store, Ok(live.instance)),
+                    None => {
+                        let host = std::mem::take(live.store.data_mut());
+                        let mut store = Store::new(self.runtime.engine(), host);
+                        store.limiter(|s| &mut s.limits);
+                        store
+                            .set_fuel(u64::MAX)
+                            .expect("fuel metering is enabled in the engine config");
+                        let instance = prepared.pre.instantiate(&mut store);
+                        (store, instance)
+                    }
+                }
+            }
+            None => {
+                let mut store = Store::new(self.runtime.engine(), host);
+                store.limiter(|s| &mut s.limits);
+                store
+                    .set_fuel(u64::MAX)
+                    .expect("fuel metering is enabled in the engine config");
+                let instance = prepared.pre.instantiate(&mut store);
+                (store, instance)
+            }
+        };
 
         let mut fuel_used = 0;
-        let result = match prepared.pre.instantiate(&mut store) {
+        let mut keep = None;
+        let result = match instance {
             Err(err) => Err(classify(&err)),
             Ok(_) if prepared.init_fuel > budget.fuel_per_tick => {
                 fuel_used = budget.fuel_per_tick;
@@ -659,6 +734,16 @@ impl Kernel {
                     .get_typed_func::<(), ()>(&mut store, "tick")
                     .and_then(|tick| tick.call(&mut store, ()));
                 fuel_used = budget.fuel_per_tick - store.get_fuel().unwrap_or(0);
+                if let Some(r) = &prepared.reset {
+                    let grown = r.pages.is_some_and(|pages| {
+                        instance
+                            .get_memory(&mut store, MEMORY_EXPORT)
+                            .is_none_or(|m| m.size(&store) != pages)
+                    });
+                    if !grown {
+                        keep = Some(instance);
+                    }
+                }
                 called.map_err(|err| {
                     let depth = instance
                         .get_global(&mut store, DEPTH_EXPORT)
@@ -670,7 +755,18 @@ impl Kernel {
                 })
             }
         };
-        let host = store.into_data();
+        let host = std::mem::take(store.data_mut());
+        if let Some(instance) = keep {
+            self.live.insert(
+                id,
+                Live {
+                    wasm: capsule.wasm,
+                    memory_bytes: budget.memory_bytes,
+                    store,
+                    instance,
+                },
+            );
+        }
         self.state.world = host.world;
         let result = result.and_then(|()| self.check_quota(&host.txn, None).map_err(Fault::Denied));
 
@@ -787,5 +883,88 @@ fn classify(err: &wasmtime::Error) -> Fault {
         Some(Trap::OutOfFuel) => Fault::OutOfFuel,
         Some(trap) => Fault::Trap(trap.to_string()),
         None => Fault::Trap(err.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod reuse {
+    use super::*;
+
+    const DIRTY: &str = r#"(module
+  (import "world" "set_num" (func $set (param i32 i32 i32 f64)))
+  (memory (export "memory") 1)
+  (global $g (mut i32) (i32.const 7))
+  (global $f (mut f64) (f64.const 2.5))
+  (data (i32.const 0) "seen")
+  (data (i32.const 8) "glob")
+  (data (i32.const 16) "size")
+  (data (i32.const 24) "word")
+  (data (i32.const 32) "flt")
+  (func (export "tick")
+    (call $set (i32.const 0) (i32.const 0) (i32.const 4) (f64.convert_i32_u (i32.load (i32.const 100))))
+    (call $set (i32.const 0) (i32.const 8) (i32.const 4) (f64.convert_i32_s (global.get $g)))
+    (call $set (i32.const 0) (i32.const 16) (i32.const 4) (f64.convert_i32_s (memory.size)))
+    (call $set (i32.const 0) (i32.const 24) (i32.const 4) (f64.convert_i32_u (i32.load8_u (i32.const 0))))
+    (call $set (i32.const 0) (i32.const 32) (i32.const 3) (global.get $f))
+    (i32.store (i32.const 100) (i32.const 999))
+    (i32.store8 (i32.const 0) (i32.const 0))
+    (global.set $g (i32.const 1234))
+    (global.set $f (f64.const -1))
+    GROW))"#;
+
+    fn run(src: &str) -> (Vec<Vec<f64>>, usize) {
+        let mut k = Kernel::new(Law::default(), 1);
+        let wasm = k.add_blob(src.as_bytes().to_vec());
+        let mut seen = Vec::new();
+        let mut cached = 0;
+        let report = k.step(vec![Input {
+            actor: Actor::Admin,
+            action: Action::Install {
+                wasm,
+                grants: Vec::new(),
+                budget: Law::default().ceiling,
+            },
+        }]);
+        assert!(
+            report.runs.iter().all(|r| r.fault.is_none()),
+            "{:?}",
+            report.runs
+        );
+        for _ in 0..5 {
+            let report = k.step(Vec::new());
+            assert!(
+                report.runs.iter().all(|r| r.fault.is_none()),
+                "{:?}",
+                report.runs
+            );
+            let me = k.state().capsules[&CapsuleId(0)].self_entity;
+            let e = k.world().entity(me).expect("own entity");
+            seen.push(
+                ["seen", "glob", "size", "word", "flt"]
+                    .iter()
+                    .map(|key| match e.components.get(*key) {
+                        Some(aether_world::Value::Num(n)) => *n,
+                        other => panic!("{key}: {other:?}"),
+                    })
+                    .collect(),
+            );
+            cached = cached.max(k.live.len());
+        }
+        (seen, cached)
+    }
+
+    #[test]
+    fn reused_instances_start_every_tick_exactly_like_fresh_ones() {
+        let fresh = vec![0.0, 7.0, 1.0, 115.0, 2.5];
+        let (seen, cached) = run(&DIRTY.replace("GROW", ""));
+        assert_eq!(cached, 1, "the instance is kept between ticks");
+        for tick in &seen {
+            assert_eq!(tick, &fresh);
+        }
+        let (seen, cached) = run(&DIRTY.replace("GROW", "(drop (memory.grow (i32.const 1)))"));
+        assert_eq!(cached, 0, "an instance whose memory grew is not kept");
+        for tick in &seen {
+            assert_eq!(tick, &fresh);
+        }
     }
 }

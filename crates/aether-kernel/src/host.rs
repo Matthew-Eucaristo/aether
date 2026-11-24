@@ -38,6 +38,30 @@ pub(crate) struct HostState {
     pub limits: StoreLimits,
 }
 
+impl Default for HostState {
+    fn default() -> Self {
+        let world = World::default();
+        let txn = world.begin();
+        HostState {
+            world,
+            txn,
+            capsule: CapsuleId(0),
+            clist: Vec::new(),
+            max_clist_len: 0,
+            max_entities: 0,
+            writes_left: 0,
+            spawns_left: 0,
+            rng: 0,
+            log: Vec::new(),
+            log_bytes_left: 0,
+            signals: Arc::from(Vec::new()),
+            installers: Arc::new(BTreeMap::new()),
+            emitted: Vec::new(),
+            limits: wasmtime::StoreLimitsBuilder::new().build(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum HostError {
     #[error("handle {0} is not in this capsule's capability list")]

@@ -17,9 +17,29 @@ pub(crate) fn features() -> WasmFeatures {
     WasmFeatures::WASM2.difference(WasmFeatures::GC_TYPES)
 }
 
+pub(crate) const MEMORY_EXPORT: &str = "aether:memory";
+const RESERVED: &str = "aether:";
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Init {
+    I32(i32),
+    I64(i64),
+    F32(u32),
+    F64(u64),
+    V128(u128),
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Reset {
+    pub pages: Option<u64>,
+    pub data: Vec<(u32, Vec<u8>)>,
+    pub globals: Vec<(String, Init)>,
+}
+
 pub(crate) struct Metered {
     pub wasm: Vec<u8>,
     pub init_fuel: u64,
+    pub reset: Option<Reset>,
 }
 
 struct Analysis {
@@ -28,6 +48,20 @@ struct Analysis {
     depth_global: u32,
     costs: Vec<u32>,
     indirect_costs: Vec<u32>,
+    reset: Option<Reset>,
+}
+
+fn const_init(expr: &wasmparser::ConstExpr) -> Option<Init> {
+    let mut ops = expr.get_operators_reader();
+    let init = match ops.read().ok()? {
+        Operator::I32Const { value } => Init::I32(value),
+        Operator::I64Const { value } => Init::I64(value),
+        Operator::F32Const { value } => Init::F32(value.bits()),
+        Operator::F64Const { value } => Init::F64(value.bits()),
+        Operator::V128Const { value } => Init::V128(u128::from_le_bytes(*value.bytes())),
+        _ => return None,
+    };
+    matches!(ops.read().ok()?, Operator::End).then_some(init)
 }
 
 fn analyze(wasm: &[u8]) -> Result<Analysis, String> {
@@ -38,6 +72,7 @@ fn analyze(wasm: &[u8]) -> Result<Analysis, String> {
     let mut globals: u32 = 0;
     let mut init_fuel: u64 = 0;
     let mut costs = Vec::new();
+    let mut reset = Some(Reset::default());
     for payload in Parser::new(0).parse_all(wasm) {
         let payload = payload.map_err(|e| e.to_string())?;
         match &payload {
@@ -58,8 +93,11 @@ fn analyze(wasm: &[u8]) -> Result<Analysis, String> {
                             func_types.push(t);
                             imported_funcs += 1;
                         }
-                        TypeRef::Global(_) => globals += 1,
-                        _ => {}
+                        TypeRef::Global(_) => {
+                            globals += 1;
+                            reset = None;
+                        }
+                        _ => reset = None,
                     }
                 }
             }
@@ -68,16 +106,56 @@ fn analyze(wasm: &[u8]) -> Result<Analysis, String> {
                     func_types.push(t.map_err(|e| e.to_string())?);
                 }
             }
-            Payload::GlobalSection(r) => globals += r.count(),
+            Payload::GlobalSection(r) => {
+                for global in r.clone() {
+                    let global = global.map_err(|e| e.to_string())?;
+                    if global.ty.mutable
+                        && let Some(re) = reset.as_mut()
+                    {
+                        match const_init(&global.init_expr) {
+                            Some(init) => re.globals.push((format!("{RESERVED}g{globals}"), init)),
+                            None => reset = None,
+                        }
+                    }
+                    globals += 1;
+                }
+            }
+            Payload::MemorySection(r) => {
+                let mut memories = r.clone().into_iter();
+                match (memories.next(), memories.next(), reset.as_mut()) {
+                    (Some(memory), None, Some(re)) => {
+                        re.pages = Some(memory.map_err(|e| e.to_string())?.initial)
+                    }
+                    _ => reset = None,
+                }
+            }
+            Payload::TableSection(r) if r.count() > 0 => reset = None,
             Payload::DataSection(r) => {
                 for data in r.clone() {
                     let data = data.map_err(|e| e.to_string())?;
-                    if matches!(data.kind, DataKind::Active { .. }) {
-                        init_fuel += data.data.len() as u64;
+                    match &data.kind {
+                        DataKind::Active {
+                            memory_index: 0,
+                            offset_expr,
+                        } => {
+                            init_fuel += data.data.len() as u64;
+                            match (const_init(offset_expr), reset.as_mut()) {
+                                (Some(Init::I32(at)), Some(re)) => {
+                                    re.data.push((at as u32, data.data.to_vec()))
+                                }
+                                _ => reset = None,
+                            }
+                        }
+                        DataKind::Active { .. } => {
+                            init_fuel += data.data.len() as u64;
+                            reset = None;
+                        }
+                        DataKind::Passive => reset = None,
                     }
                 }
             }
             Payload::ElementSection(r) => {
+                reset = None;
                 for element in r.clone() {
                     let element = element.map_err(|e| e.to_string())?;
                     if matches!(element.kind, ElementKind::Active { .. }) {
@@ -93,8 +171,12 @@ fn analyze(wasm: &[u8]) -> Result<Analysis, String> {
             }
             Payload::ExportSection(r) => {
                 for export in r.clone() {
-                    if export.map_err(|e| e.to_string())?.name == DEPTH_EXPORT {
+                    let name = export.map_err(|e| e.to_string())?.name;
+                    if name == DEPTH_EXPORT {
                         return Err(format!("the export name {DEPTH_EXPORT:?} is reserved"));
+                    }
+                    if name.starts_with(RESERVED) {
+                        reset = None;
                     }
                 }
             }
@@ -140,12 +222,16 @@ fn analyze(wasm: &[u8]) -> Result<Analysis, String> {
                 .fold(FRAME_BASE, u32::max)
         })
         .collect();
+    if let Some(re) = reset.as_mut() {
+        re.globals.push((DEPTH_EXPORT.to_owned(), Init::I32(0)));
+    }
     Ok(Analysis {
         init_fuel,
         imported_funcs,
         depth_global: globals,
         costs,
         indirect_costs,
+        reset,
     })
 }
 
@@ -198,14 +284,25 @@ fn section(out: &mut Vec<u8>, id: u8, data: &[u8]) {
     out.extend_from_slice(data);
 }
 
-fn append_entry(data: &[u8], entry: &[u8]) -> Result<Vec<u8>, String> {
+fn append_entries(data: &[u8], entries: &[Vec<u8>]) -> Result<Vec<u8>, String> {
     let mut reader = BinaryReader::new(data, 0);
     let count = reader.read_var_u32().map_err(|e| e.to_string())?;
-    let mut out = Vec::with_capacity(data.len() + entry.len() + 5);
-    uleb(&mut out, count + 1);
+    let mut out = Vec::with_capacity(data.len() + entries.len() * 16 + 5);
+    uleb(&mut out, count + entries.len() as u32);
     out.extend_from_slice(&data[reader.current_position()..]);
-    out.extend_from_slice(entry);
+    for entry in entries {
+        out.extend_from_slice(entry);
+    }
     Ok(out)
+}
+
+fn export(name: &str, kind: u8, index: u32) -> Vec<u8> {
+    let mut entry = Vec::new();
+    uleb(&mut entry, name.len() as u32);
+    entry.extend_from_slice(name.as_bytes());
+    entry.push(kind);
+    uleb(&mut entry, index);
+    entry
 }
 
 fn instrument_body(a: &Analysis, body: &[u8], out: &mut Vec<u8>) -> Result<(), String> {
@@ -270,12 +367,21 @@ fn order(id: u8) -> u8 {
 
 pub(crate) fn instrument(wasm: &[u8]) -> Result<Metered, String> {
     let a = analyze(wasm)?;
-    let global_entry = [0x7f, 0x01, 0x41, 0x00, 0x0b];
-    let mut export_entry = Vec::new();
-    uleb(&mut export_entry, DEPTH_EXPORT.len() as u32);
-    export_entry.extend_from_slice(DEPTH_EXPORT.as_bytes());
-    export_entry.push(0x03);
-    uleb(&mut export_entry, a.depth_global);
+    let global_entry = vec![0x7f, 0x01, 0x41, 0x00, 0x0b];
+    let mut exports = vec![export(DEPTH_EXPORT, 0x03, a.depth_global)];
+    if let Some(re) = &a.reset {
+        if re.pages.is_some() {
+            exports.push(export(MEMORY_EXPORT, 0x02, 0));
+        }
+        for (name, _) in &re.globals {
+            if let Some(index) = name
+                .strip_prefix(RESERVED)
+                .and_then(|g| g.strip_prefix('g'))
+            {
+                exports.push(export(name, 0x03, index.parse().map_err(|_| "bad global")?));
+            }
+        }
+    }
 
     let mut out = wasm[..8].to_vec();
     let mut reader = BinaryReader::new(wasm, 0);
@@ -294,11 +400,15 @@ pub(crate) fn instrument(wasm: &[u8]) -> Result<Metered, String> {
         }
         match id {
             SECTION_GLOBAL => {
-                section(&mut out, id, &append_entry(data, &global_entry)?);
+                section(
+                    &mut out,
+                    id,
+                    &append_entries(data, std::slice::from_ref(&global_entry))?,
+                );
                 global_done = true;
             }
             SECTION_EXPORT => {
-                section(&mut out, id, &append_entry(data, &export_entry)?);
+                section(&mut out, id, &append_entries(data, &exports)?);
                 export_done = true;
             }
             SECTION_CODE => section(&mut out, id, &instrument_code(&a, data)?),
@@ -311,6 +421,7 @@ pub(crate) fn instrument(wasm: &[u8]) -> Result<Metered, String> {
     Ok(Metered {
         wasm: out,
         init_fuel: a.init_fuel,
+        reset: a.reset,
     })
 }
 

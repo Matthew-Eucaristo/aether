@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use std::sync::Arc;
+
 use wasmtime::{Config, Engine, ExternType, InstancePre, Linker, Module};
 
 use crate::blob::{BlobHash, Blobs};
@@ -9,11 +11,13 @@ use crate::meter;
 
 pub(crate) const WASM_STACK: usize = 16 << 20;
 pub(crate) const THREAD_STACK: usize = WASM_STACK + (8 << 20);
+pub(crate) const TABLE_ELEMENTS: usize = 10_000;
 
 #[derive(Clone)]
 pub(crate) struct Prepared {
     pub pre: InstancePre<HostState>,
     pub init_fuel: u64,
+    pub reset: Option<Arc<meter::Reset>>,
 }
 
 pub(crate) struct Runtime {
@@ -73,6 +77,7 @@ impl Runtime {
         let prepared = Prepared {
             pre,
             init_fuel: metered.init_fuel,
+            reset: metered.reset.map(Arc::new),
         };
         self.cache.insert(*hash, prepared.clone());
         Ok(prepared)

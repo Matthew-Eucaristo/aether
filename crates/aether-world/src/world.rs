@@ -62,7 +62,7 @@ impl Digest {
     }
 }
 
-const PARALLEL_FROM: usize = 256;
+const PARALLEL_FROM: usize = 64;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Derived {
