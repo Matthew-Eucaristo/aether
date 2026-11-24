@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use aether_world::{
@@ -14,6 +15,7 @@ const COST_WRITE: u64 = 50;
 const COST_SPAWN: u64 = 1_000;
 const COST_DESPAWN: u64 = 200;
 const COST_LOG: u64 = 10;
+const COST_MATH: u64 = 20;
 
 pub(crate) struct HostState {
     pub world: World,
@@ -28,6 +30,7 @@ pub(crate) struct HostState {
     pub log: Vec<String>,
     pub log_bytes_left: usize,
     pub signals: Arc<[Signal]>,
+    pub installers: Arc<BTreeMap<CapsuleId, String>>,
     pub emitted: Vec<Signal>,
     pub limits: StoreLimits,
 }
@@ -421,6 +424,49 @@ pub(crate) fn linker(engine: &Engine) -> wasmtime::Result<Linker<HostState>> {
             deny(write_out(&mut c, bp, bl, owner.as_bytes()))
         },
     )?;
+
+    l.func_wrap(
+        "world",
+        "installer",
+        |mut c: Caller<'_, HostState>, capsule: i64, bp: i32, bl: i32| -> wasmtime::Result<i32> {
+            charge(&mut c, COST_READ)?;
+            let Some(label) = u64::try_from(capsule)
+                .ok()
+                .and_then(|id| c.data().installers.get(&CapsuleId(id)).cloned())
+            else {
+                return Ok(-1);
+            };
+            deny(write_out(&mut c, bp, bl, label.as_bytes()))
+        },
+    )?;
+
+    let unary: [(&str, fn(f64) -> f64); 4] = [
+        ("sin", libm::sin),
+        ("cos", libm::cos),
+        ("exp", libm::exp),
+        ("ln", libm::log),
+    ];
+    for (name, f) in unary {
+        l.func_wrap(
+            "world",
+            name,
+            move |mut c: Caller<'_, HostState>, x: f64| -> wasmtime::Result<f64> {
+                charge(&mut c, COST_MATH)?;
+                Ok(f(x))
+            },
+        )?;
+    }
+    let binary: [(&str, fn(f64, f64) -> f64); 2] = [("atan2", libm::atan2), ("pow", libm::pow)];
+    for (name, f) in binary {
+        l.func_wrap(
+            "world",
+            name,
+            move |mut c: Caller<'_, HostState>, a: f64, b: f64| -> wasmtime::Result<f64> {
+                charge(&mut c, COST_MATH)?;
+                Ok(f(a, b))
+            },
+        )?;
+    }
 
     l.func_wrap(
         "world",

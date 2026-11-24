@@ -16,7 +16,7 @@ use crate::runtime::{Runtime, THREAD_STACK};
 use crate::signal::{Sender, Signal};
 
 const LOG_BYTES_PER_TICK: usize = 1024;
-pub const RULES: &str = "aether-rules/9";
+pub const RULES: &str = "aether-rules/10";
 pub const GUARANTEED_FUEL: u64 = 250_000;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -212,6 +212,13 @@ impl Kernel {
             .map(|(id, _)| *id)
             .collect();
         let signals: Arc<[Signal]> = std::mem::take(&mut self.delivering).into();
+        let installers: Arc<BTreeMap<CapsuleId, String>> = Arc::new(
+            self.state
+                .capsules
+                .iter()
+                .map(|(id, c)| (*id, Sender::Actor(c.installer.clone()).label()))
+                .collect(),
+        );
         let runs = std::thread::scope(|s| {
             std::thread::Builder::new()
                 .name("aether-capsules".into())
@@ -226,7 +233,8 @@ impl Kernel {
                         .map(|(i, id)| {
                             let reserve = floor * (count - 1 - i as u64);
                             let cap = remaining.saturating_sub(reserve);
-                            let run = self.run_capsule(id, cap, &signals, &mut touched);
+                            let run =
+                                self.run_capsule(id, cap, &signals, &installers, &mut touched);
                             remaining = remaining.saturating_sub(run.fuel_used);
                             run
                         })
@@ -586,6 +594,7 @@ impl Kernel {
         id: CapsuleId,
         region_cap: u64,
         signals: &Arc<[Signal]>,
+        installers: &Arc<BTreeMap<CapsuleId, String>>,
         touched: &mut BTreeSet<EntityId>,
     ) -> CapsuleRun {
         let law = self.state.law.clone();
@@ -618,6 +627,7 @@ impl Kernel {
             log: Vec::new(),
             log_bytes_left: LOG_BYTES_PER_TICK,
             signals: signals.clone(),
+            installers: installers.clone(),
             emitted: Vec::new(),
             limits: StoreLimitsBuilder::new()
                 .memory_size(usize::try_from(budget.memory_bytes).unwrap_or(usize::MAX))

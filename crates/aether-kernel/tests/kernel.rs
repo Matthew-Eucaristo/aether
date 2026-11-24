@@ -937,6 +937,61 @@ fn capabilities_can_be_granted_and_revoked_after_install() {
     ));
 }
 
+const MATH: &str = r#"(module
+  (import "world" "sin" (func $sin (param f64) (result f64)))
+  (import "world" "atan2" (func $atan2 (param f64 f64) (result f64)))
+  (import "world" "pow" (func $pow (param f64 f64) (result f64)))
+  (import "world" "ln" (func $ln (param f64) (result f64)))
+  (import "world" "installer" (func $installer (param i64 i32 i32) (result i32)))
+  (import "world" "set_num" (func $set (param i32 i32 i32 f64)))
+  (import "world" "set_text" (func $set_text (param i32 i32 i32 i32 i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "sin")
+  (data (i32.const 8) "atan2")
+  (data (i32.const 16) "pow")
+  (data (i32.const 24) "ln")
+  (data (i32.const 32) "by")
+  (data (i32.const 40) "none")
+  (func (export "tick")
+    (call $set (i32.const 0) (i32.const 0) (i32.const 3) (call $sin (f64.const 0.5)))
+    (call $set (i32.const 0) (i32.const 8) (i32.const 5) (call $atan2 (f64.const 1) (f64.const -1)))
+    (call $set (i32.const 0) (i32.const 16) (i32.const 3) (call $pow (f64.const 2) (f64.const 10)))
+    (call $set (i32.const 0) (i32.const 24) (i32.const 2) (call $ln (f64.const 2.718281828459045)))
+    (call $set_text (i32.const 0) (i32.const 32) (i32.const 2) (i32.const 64)
+      (call $installer (i64.const 0) (i32.const 64) (i32.const 32)))
+    (call $set (i32.const 0) (i32.const 40) (i32.const 4)
+      (f64.convert_i32_s (call $installer (i64.const 99) (i32.const 64) (i32.const 32))))))"#;
+
+#[test]
+fn math_and_installers_are_readable() {
+    let mut k = Kernel::new(Law::default(), 4);
+    let wasm = k.add_blob(MATH.as_bytes().to_vec());
+    let r = k.step(vec![Input {
+        actor: player("ana"),
+        action: Action::Install {
+            wasm,
+            grants: vec![],
+            budget: budget(),
+        },
+    }]);
+    assert!(
+        matches!(r.inputs[0], InputOutcome::Installed(_)),
+        "{:?}",
+        r.inputs[0]
+    );
+    assert_eq!(fault_of(&r, CapsuleId(0)), None);
+    let me = self_entity(&k, CapsuleId(0));
+    assert_eq!(num(&k, me, "sin"), Some(0.479425538604203));
+    assert_eq!(num(&k, me, "atan2"), Some(2.356194490192345));
+    assert_eq!(num(&k, me, "pow"), Some(1024.0));
+    assert_eq!(num(&k, me, "ln"), Some(1.0));
+    assert_eq!(num(&k, me, "none"), Some(-1.0));
+    assert_eq!(
+        k.world().entity(me).unwrap().components.get("by"),
+        Some(&Value::Text("player:ana".into()))
+    );
+}
+
 const CHURN: &str = r#"(module
   (import "world" "spawn" (func $spawn (result i32)))
   (import "world" "despawn" (func $despawn (param i32)))
@@ -997,6 +1052,7 @@ fn rules_fingerprint() {
         capsule!("rollback"),
         capsule!("spawner"),
         CHURN,
+        MATH,
     ] {
         install(&mut k, name, vec![]);
     }
@@ -1037,8 +1093,8 @@ fn rules_fingerprint() {
     assert_eq!(
         (RULES, fingerprint.as_str()),
         (
-            "aether-rules/9",
-            "489520ef808c8487a9771f655dbcd190ff42dc76ac6333950bfc78d5e9fef244"
+            "aether-rules/10",
+            "c4c46c665ec41a1aabf5bbd91523f0599a23415a036538c80bc521276185530d"
         ),
         "the kernel's observable behaviour changed: if that is intended, bump RULES and update this fingerprint"
     );

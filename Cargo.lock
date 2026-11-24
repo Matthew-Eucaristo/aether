@@ -49,6 +49,7 @@ dependencies = [
  "aether-world",
  "arbitrary",
  "blake3",
+ "libm",
  "serde",
  "serde_json",
  "thiserror",
