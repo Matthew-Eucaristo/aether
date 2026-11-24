@@ -643,3 +643,21 @@ fn join_burst_does_not_stall_the_world_clock() {
         "world must keep ticking at ~10Hz during a join storm; observed {rate:.1} ticks/s"
     );
 }
+
+#[test]
+fn a_client_close_is_answered_with_a_close_frame() {
+    let server = fresh_server("close");
+    let mut ws = Ws::connect(server.port, "player=closer").unwrap();
+    ws.recv_json().unwrap();
+    ws.send_frame(8, &1000u16.to_be_bytes()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        let (op, _) = ws
+            .recv_msg()
+            .expect("the server answers before closing the connection");
+        if op == 0xFF {
+            return;
+        }
+    }
+    panic!("no close frame came back");
+}

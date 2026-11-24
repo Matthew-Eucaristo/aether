@@ -410,7 +410,11 @@ async fn session(mut socket: WebSocket, actor: Actor, app: App) {
             incoming = socket.recv() => {
                 let text = match incoming {
                     Some(Ok(Message::Text(text))) => text,
-                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return,
+                    Some(Ok(Message::Close(_))) => {
+                        let _ = socket.recv().await;
+                        return;
+                    }
+                    Some(Err(_)) | None => return,
                     Some(Ok(_)) => continue,
                 };
                 match serde_json::from_str::<ClientMsg>(text.as_str()) {
