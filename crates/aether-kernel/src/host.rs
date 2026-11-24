@@ -17,6 +17,9 @@ const COST_DESPAWN: u64 = 200;
 const COST_LOG: u64 = 10;
 const COST_MATH: u64 = 20;
 
+type Unary = fn(f64) -> f64;
+type Binary = fn(f64, f64) -> f64;
+
 pub(crate) struct HostState {
     pub world: World,
     pub txn: Txn,
@@ -440,7 +443,7 @@ pub(crate) fn linker(engine: &Engine) -> wasmtime::Result<Linker<HostState>> {
         },
     )?;
 
-    let unary: [(&str, fn(f64) -> f64); 4] = [
+    let unary: [(&str, Unary); 4] = [
         ("sin", libm::sin),
         ("cos", libm::cos),
         ("exp", libm::exp),
@@ -456,7 +459,7 @@ pub(crate) fn linker(engine: &Engine) -> wasmtime::Result<Linker<HostState>> {
             },
         )?;
     }
-    let binary: [(&str, fn(f64, f64) -> f64); 2] = [("atan2", libm::atan2), ("pow", libm::pow)];
+    let binary: [(&str, Binary); 2] = [("atan2", libm::atan2), ("pow", libm::pow)];
     for (name, f) in binary {
         l.func_wrap(
             "world",
