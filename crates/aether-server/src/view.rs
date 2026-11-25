@@ -168,11 +168,22 @@ impl Cache {
     }
 }
 
-fn visible(k: &Kernel, focus: Focus) -> BTreeSet<EntityId> {
-    k.world()
+fn visible(k: &Kernel, viewer: &Viewer) -> BTreeSet<EntityId> {
+    let focus = viewer.focus;
+    let mut seen: BTreeSet<EntityId> = k
+        .world()
         .near(focus.dim, focus.x, focus.y, VIEW_RADIUS)
         .into_iter()
-        .collect()
+        .collect();
+    if let Actor::Player(p) = &viewer.actor {
+        let label = Value::Text(format!("player:{}", p.0));
+        seen.extend(k.world().having("player").filter(|id| {
+            k.world()
+                .entity(*id)
+                .is_some_and(|e| e.components.get("player") == Some(&label))
+        }));
+    }
+    seen
 }
 
 fn frame(text: String, halfs: Vec<u16>) -> Update {
@@ -199,7 +210,7 @@ fn deliver(viewer: &mut Viewer, update: Update) -> Sent {
 }
 
 pub fn hello(k: &Kernel, viewer: &mut Viewer, cache: &mut Cache) -> Sent {
-    let near = visible(k, viewer.focus);
+    let near = visible(k, viewer);
     let mut ids: BTreeMap<EntityId, bool> = near.iter().map(|id| (*id, true)).collect();
     ids.extend(cache.globals(k).iter().map(|id| (*id, true)));
     let (entities, halfs) = cache.entities(k, &ids);
@@ -246,7 +257,7 @@ pub fn tick(
         }
         return hello(k, viewer, cache);
     }
-    let near = visible(k, viewer.focus);
+    let near = visible(k, viewer);
     let mut ids: BTreeMap<EntityId, bool> = BTreeMap::new();
     let mut left: BTreeSet<EntityId> = BTreeSet::new();
     for id in &report.touched {
