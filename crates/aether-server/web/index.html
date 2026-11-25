@@ -1693,11 +1693,11 @@ function nameColor(name) {
 }
 function solids() {
   const out = [];
-  for (const e of world.entities.values()) {
+  for (const [id, e] of world.entities) {
     const c = e.components, shape = text(e, "shape");
     const kind = shape === "box" ? 0 : shape === "sphere" ? 1 : shape === "cylinder" ? 2 : -1;
-    if (kind < 0 || c.of || c.projectile || c.avatar || num(e, "pos.x") === undefined) continue;
-    if (!(c.solid && "bool" in c.solid ? c.solid.bool : kind === 0)) continue;
+    if (kind < 0 || c.of || c.projectile || num(e, "pos.x") === undefined) continue;
+    if (c.avatar ? id === play.avatar || (num(e, "dim") ?? 0) !== currentDim() : !(c.solid && "bool" in c.solid ? c.solid.bool : kind === 0)) continue;
     const size = num(e, "size") ?? 0.28, full = kind === 1 ? 1 : 0.5, d = kind === 1 ? size : size * 2;
     const R = rotation(orient(e, shape));
     out.push({ kind, x: num(e, "pos.x"), y: num(e, "pos.y") ?? 0, z: num(e, "pos.z") ?? 0,

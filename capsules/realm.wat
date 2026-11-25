@@ -756,6 +756,34 @@
         (local.set $c (i32.add (local.get $c) (i32.const 1)))
         (br $each))))
 
+  (func $crowd (param $i i32) (param $z f64)
+    (local $j i32) (local $f i32) (local $dx f64) (local $dy f64) (local $d f64) (local $push f64)
+    (block $done
+      (loop $each
+        (br_if $done (i32.ge_u (local.get $j) (global.get $n)))
+        (local.set $f (call $entry (local.get $j)))
+        (if (i32.and (i32.and (i32.ne (local.get $j) (local.get $i))
+                              (f64.le (f64.load offset=48 (local.get $f)) (f64.const 0)))
+                     (i32.and (f64.eq (f64.load offset=144 (local.get $f)) (global.get $bdim))
+                              (f64.lt (f64.abs (f64.sub (f64.load offset=72 (local.get $f)) (local.get $z))) (f64.const 1.8))))
+          (then
+            (local.set $dx (f64.sub (global.get $bx) (f64.load offset=56 (local.get $f))))
+            (local.set $dy (f64.sub (global.get $by) (f64.load offset=64 (local.get $f))))
+            (local.set $d (f64.sqrt (f64.add (f64.mul (local.get $dx) (local.get $dx)) (f64.mul (local.get $dy) (local.get $dy)))))
+            (if (f64.lt (local.get $d) (f64.const 0.7))
+              (then
+                (if (f64.lt (local.get $d) (f64.const 1e-6))
+                  (then
+                    (local.set $dx (select (f64.const -1) (f64.const 1) (i32.lt_u (local.get $i) (local.get $j))))
+                    (local.set $dy (f64.const 0))
+                    (local.set $d (f64.const 1))
+                    (local.set $push (f64.const 0.35)))
+                  (else (local.set $push (f64.sub (f64.const 0.7) (local.get $d)))))
+                (global.set $bx (f64.add (global.get $bx) (f64.mul (f64.div (local.get $dx) (local.get $d)) (local.get $push))))
+                (global.set $by (f64.add (global.get $by) (f64.mul (f64.div (local.get $dy) (local.get $d)) (local.get $push))))))))
+        (local.set $j (i32.add (local.get $j) (i32.const 1)))
+        (br $each))))
+
   (func $move (param $i i32)
     (local $e i32) (local $q i32) (local $j i32) (local $nc i32) (local $steps i32) (local $s i32)
     (local $z f64) (local $vz f64) (local $speed f64) (local $mx f64) (local $my f64) (local $len f64)
@@ -802,6 +830,8 @@
     (loop $sub
       (global.set $bx (f64.add (global.get $bx) (f64.div (local.get $mx) (f64.convert_i32_u (local.get $steps)))))
       (global.set $by (f64.add (global.get $by) (f64.div (local.get $my) (f64.convert_i32_u (local.get $steps)))))
+      (if (f64.le (f64.load offset=48 (local.get $e)) (f64.const 0))
+        (then (call $crowd (local.get $i) (local.get $z))))
       (call $collide (local.get $z) (local.get $vz) (local.get $nc))
       (local.set $s (i32.add (local.get $s) (i32.const 1)))
       (br_if $sub (i32.lt_u (local.get $s) (local.get $steps))))

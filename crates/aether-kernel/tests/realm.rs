@@ -725,3 +725,38 @@ fn a_long_wall_stops_bullets_far_from_its_centre() {
         "the wall's far end still stops bullets"
     );
 }
+
+#[test]
+fn bodies_cannot_stand_inside_each_other() {
+    let Duel {
+        mut k, ana, budi, ..
+    } = duel();
+    step(
+        &mut k,
+        vec![
+            (Actor::Admin, set(ana, "pos.x", 3.0)),
+            (Actor::Admin, set(ana, "pos.y", 0.0)),
+            (Actor::Admin, set(budi, "pos.x", 3.0)),
+            (Actor::Admin, set(budi, "pos.y", 0.0)),
+        ],
+    );
+    for _ in 0..4 {
+        step(&mut k, vec![]);
+    }
+    let (a, b) = (place_of(&k, ana), place_of(&k, budi));
+    let apart = (a.0 - b.0).hypot(a.1 - b.1);
+    assert!(
+        apart >= 0.69,
+        "two bodies on one spot were pushed apart: {apart}"
+    );
+    step(&mut k, vec![(player("ana"), signal(ana, "mx", 1.0))]);
+    for _ in 0..20 {
+        step(&mut k, vec![]);
+        let (a, b) = (place_of(&k, ana), place_of(&k, budi));
+        let apart = (a.0 - b.0).hypot(a.1 - b.1);
+        assert!(
+            apart >= 0.6,
+            "walking never passes through another body: {apart}"
+        );
+    }
+}
