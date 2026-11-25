@@ -722,3 +722,67 @@ fn viewers_get_what_is_near_their_focus_and_lose_what_leaves_it() {
     }
     panic!("moving the focus must bring the far entity ({arrived}) and drop the near one ({gone})");
 }
+
+#[test]
+fn focus_dimension_updates_drop_and_restore_positioned_entities() {
+    let server = fresh_server("interestdim");
+    let mut admin = Ws::connect(server.port, &format!("token={}", server.token)).unwrap();
+    admin.recv_json().unwrap();
+    admin
+        .send_text(
+            r#"{"type":"act","action":{"op":"spawn","components":{"probe":{"num":1},"pos.x":{"num":0},"pos.y":{"num":0}}}}"#,
+        )
+        .unwrap();
+    let mut eid = None;
+    for _ in 0..10 {
+        let tick = admin.wait_tick();
+        let inputs = tick["inputs"].as_array().unwrap();
+        let outcomes = tick["report"]["inputs"].as_array().unwrap();
+        for (inp, out) in inputs.iter().zip(outcomes.iter()) {
+            if inp["action"]["op"] == "spawn" && inp["action"]["components"]["probe"]["num"] == 1.0
+            {
+                eid = out["spawned"].as_u64();
+            }
+        }
+        if eid.is_some() {
+            break;
+        }
+    }
+    let eid = eid.expect("probe spawn outcome");
+    admin
+        .send_text(&format!(
+            r#"{{"type":"act","action":{{"op":"set","entity":{eid},"key":"dim","value":{{"num":5}}}}}}"#
+        ))
+        .unwrap();
+    let mut saw_left = false;
+    for _ in 0..10 {
+        let tick = admin.wait_tick();
+        if tick["left"]
+            .as_array()
+            .is_some_and(|ids| ids.iter().any(|id| id.as_u64() == Some(eid)))
+        {
+            saw_left = true;
+            break;
+        }
+    }
+    assert!(
+        saw_left,
+        "moving the probe to dimension 5 must remove it from dimension 0 view"
+    );
+    admin
+        .send_text(r#"{"type":"focus","dim":5,"x":0,"y":0}"#)
+        .unwrap();
+    let key = eid.to_string();
+    let mut restored = false;
+    for _ in 0..10 {
+        let tick = admin.wait_tick();
+        if tick["changed"][&key].is_object() {
+            restored = true;
+            break;
+        }
+    }
+    assert!(
+        restored,
+        "after focusing dimension 5 the probe is sent again"
+    );
+}

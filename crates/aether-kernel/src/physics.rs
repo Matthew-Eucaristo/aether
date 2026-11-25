@@ -10,6 +10,7 @@ pub const GRAVITY: f64 = 9.8;
 const CELL: f64 = 16.0;
 const MARGIN: f64 = 1.0;
 const MAX_EXTENT: f64 = 512.0;
+const MAX_SUBSTEPS: f64 = 32.0;
 const MAX_SPEED: f64 = 200.0;
 const REST: f64 = 0.05;
 
@@ -277,19 +278,30 @@ fn cells(dim: i64, x: f64, y: f64, reach: f64) -> impl Iterator<Item = Cell> {
     (lo.0..=hi.0).flat_map(move |cx| (lo.1..=hi.1).map(move |cy| (dim, cx, cy)))
 }
 
-fn statics(world: &World) -> (Vec<Solid>, BTreeMap<Cell, Vec<usize>>) {
+struct Statics {
+    solids: Vec<Solid>,
+    grid: BTreeMap<Cell, Vec<usize>>,
+    huge: Vec<usize>,
+}
+
+fn statics(world: &World) -> Statics {
     let solids: Vec<Solid> = world
         .having("shape")
         .filter_map(|id| solid(world.entity(id)?))
         .collect();
     let mut grid: BTreeMap<Cell, Vec<usize>> = BTreeMap::new();
+    let mut huge = Vec::new();
     for (i, s) in solids.iter().enumerate() {
         let reach = dot(s.h, s.h).sqrt() + MARGIN;
+        if reach > MAX_EXTENT {
+            huge.push(i);
+            continue;
+        }
         for cell in cells(s.dim, s.c[0], s.c[1], reach) {
             grid.entry(cell).or_default().push(i);
         }
     }
-    (solids, grid)
+    Statics { solids, grid, huge }
 }
 
 pub fn step(world: &mut World, law: &Law, touched: &mut BTreeSet<EntityId>) {
@@ -303,24 +315,36 @@ pub fn step(world: &mut World, law: &Law, touched: &mut BTreeSet<EntityId>) {
         return;
     }
     let before: Vec<([f64; 3], [f64; 3])> = bodies.iter().map(|b| (b.p, b.v)).collect();
-    let (solids, grid) = statics(world);
+    let world_statics = statics(world);
     let mut near = Vec::new();
     for b in &mut bodies {
         b.v[2] -= GRAVITY * DT;
         for v in &mut b.v {
             *v = v.clamp(-MAX_SPEED, MAX_SPEED);
         }
-        for k in 0..3 {
-            b.p[k] += b.v[k] * DT;
-        }
-        near.clear();
-        for cell in cells(b.dim, b.p[0], b.p[1], b.r) {
-            near.extend(grid.get(&cell).into_iter().flatten().copied());
-        }
-        near.sort_unstable();
-        near.dedup();
-        for &i in &near {
-            against(b, &solids[i]);
+        let travel = dot(b.v, b.v).sqrt() * DT;
+        let steps = (travel / (0.5 * b.r)).ceil().clamp(1.0, MAX_SUBSTEPS) as u32;
+        let dt = DT / f64::from(steps);
+        for _ in 0..steps {
+            for k in 0..3 {
+                b.p[k] += b.v[k] * dt;
+            }
+            near.clear();
+            for cell in cells(b.dim, b.p[0], b.p[1], b.r) {
+                near.extend(world_statics.grid.get(&cell).into_iter().flatten().copied());
+            }
+            near.extend(
+                world_statics
+                    .huge
+                    .iter()
+                    .copied()
+                    .filter(|&i| world_statics.solids[i].dim == b.dim),
+            );
+            near.sort_unstable();
+            near.dedup();
+            for &i in &near {
+                against(b, &world_statics.solids[i]);
+            }
         }
     }
     for (i, j) in pairs(&bodies) {

@@ -1181,8 +1181,8 @@ fn rules_fingerprint() {
     assert_eq!(
         (RULES, fingerprint.as_str()),
         (
-            "aether-rules/16",
-            "26b0fa7a9a182dff9f93b701543858d45415b448ccab1c13312d7d0502e95789"
+            "aether-rules/17",
+            "e1b8bba5992353b413500c4ba6c3127f359605d36df83481d482e5ba0bb8e57e"
         ),
         "the kernel's observable behaviour changed: if that is intended, bump RULES and update this fingerprint"
     );

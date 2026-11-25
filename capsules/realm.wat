@@ -98,7 +98,7 @@
   (data (i32.const 584) "player:")
   (data (i32.const 600) "home")
   (data (i32.const 608) "visit")
-  (data (i32.const 616) "homes")
+  (data (i32.const 616) "abode")
   (data (i32.const 624) "dim")
   (data (i32.const 632) "enter")
 
@@ -107,6 +107,8 @@
   (global $na (mut i32) (i32.const 0))
   (global $ns (mut i32) (i32.const 0))
   (global $wide (mut i32) (i32.const 1))
+  (global $cap (mut i32) (i32.const 512))
+  (global $arena_end (mut i32) (i32.const 0))
   (global $x0 (mut f64) (f64.const 0))
   (global $x1 (mut f64) (f64.const 0))
   (global $y0 (mut f64) (f64.const 0))
@@ -250,15 +252,15 @@
     (call $set (local.get $h) (i32.const 48) (i32.const 5) (local.get $z)))
 
   (func $homes (result i32)
-    (i32.div_u (call $nums (global.get $me) (i32.const 616) (i32.const 5) (global.get $HOMES)
-      (i32.mul (global.get $MAXHOMES) (i32.const 3))) (i32.const 3)))
+    (i32.shr_u (call $nums (global.get $me) (i32.const 616) (i32.const 5) (global.get $HOMES)
+      (i32.shl (global.get $MAXHOMES) (i32.const 2))) (i32.const 2)))
 
   (func $home_of (param $key f64) (param $count i32) (result i32)
     (local $j i32)
     (block $none
       (loop $scan
         (br_if $none (i32.ge_u (local.get $j) (local.get $count)))
-        (if (f64.eq (f64.load (i32.add (global.get $HOMES) (i32.mul (local.get $j) (i32.const 24)))) (local.get $key))
+        (if (f64.eq (f64.load (i32.add (global.get $HOMES) (i32.shl (local.get $j) (i32.const 5)))) (local.get $key))
           (then (return (local.get $j))))
         (local.set $j (i32.add (local.get $j) (i32.const 1)))
         (br $scan)))
@@ -276,16 +278,17 @@
       (then
         (if (i32.ge_u (local.get $count) (global.get $MAXHOMES))
           (then
-            (memory.copy (global.get $HOMES) (i32.add (global.get $HOMES) (i32.const 24))
-              (i32.mul (i32.sub (local.get $count) (i32.const 1)) (i32.const 24)))
+            (memory.copy (global.get $HOMES) (i32.add (global.get $HOMES) (i32.const 32))
+              (i32.shl (i32.sub (local.get $count) (i32.const 1)) (i32.const 5)))
             (local.set $count (i32.sub (local.get $count) (i32.const 1)))))
         (local.set $j (local.get $count))
         (local.set $count (i32.add (local.get $count) (i32.const 1)))))
-    (local.set $q (i32.add (global.get $HOMES) (i32.mul (local.get $j) (i32.const 24))))
+    (local.set $q (i32.add (global.get $HOMES) (i32.shl (local.get $j) (i32.const 5))))
     (f64.store (local.get $q) (call $key (local.get $i)))
     (f64.store offset=8 (local.get $q) (f64.load offset=56 (local.get $e)))
     (f64.store offset=16 (local.get $q) (f64.load offset=64 (local.get $e)))
-    (call $set_nums (i32.const 0) (i32.const 616) (i32.const 5) (global.get $HOMES) (i32.mul (local.get $count) (i32.const 3))))
+    (f64.store offset=24 (local.get $q) (f64.load offset=144 (local.get $e)))
+    (call $set_nums (i32.const 0) (i32.const 616) (i32.const 5) (global.get $HOMES) (i32.shl (local.get $count) (i32.const 2))))
 
   (func $visit (param $i i32) (param $target f64)
     (local $j i32) (local $e i32) (local $f i32)
@@ -331,7 +334,8 @@
     (local.set $r (f64.add (f64.const 2) (f64.mul (call $rand) (f64.const 4))))
     (if (i32.ge_s (local.get $j) (i32.const 0))
       (then
-        (local.set $q (i32.add (global.get $HOMES) (i32.mul (local.get $j) (i32.const 24))))
+        (local.set $q (i32.add (global.get $HOMES) (i32.shl (local.get $j) (i32.const 5))))
+        (call $move_to (local.get $i) (f64.load offset=24 (local.get $q)))
         (local.set $cx (f64.load offset=8 (local.get $q)))
         (local.set $cy (f64.load offset=16 (local.get $q)))
         (local.set $r (f64.mul (call $rand) (f64.const 1.5)))))
@@ -515,10 +519,14 @@
     (local.set $half (f64.mul (f64.max (f64.sub (global.get $x1) (global.get $x0)) (f64.sub (global.get $y1) (global.get $y0))) (f64.const 0.5)))
     (if (f64.gt (local.get $half) (f64.const 360)) (then (return)))
     (global.set $wide (i32.const 0))
+    (global.set $cap (i32.sub (global.get $MAXS) (i32.const 128)))
     (call $solids (i64.const 0)
       (f64.mul (f64.add (global.get $x0) (global.get $x1)) (f64.const 0.5))
       (f64.mul (f64.add (global.get $y0) (global.get $y1)) (f64.const 0.5))
-      (f64.mul (local.get $half) (f64.const 1.4143))))
+      (f64.mul (local.get $half) (f64.const 1.4143)))
+    (if (i32.ge_u (global.get $ns) (global.get $cap)) (then (global.set $wide (i32.const 1))))
+    (global.set $cap (global.get $MAXS))
+    (global.set $arena_end (global.get $ns)))
 
   (func $inside (param $x f64) (param $y f64) (result i32)
     (i32.and (i32.eqz (global.get $wide))
@@ -527,13 +535,19 @@
 
   (func $solids (param $dim i64) (param $x f64) (param $y f64) (param $r f64)
     (local $b i64) (local $q i32) (local $k i32) (local $size f64) (local $full f64)
-    (local $dx f64) (local $dy f64) (local $dz f64) (local $h f64)
+    (local $dx f64) (local $dy f64) (local $dz f64) (local $h f64) (local $again i32)
     (local.set $b (i64.const -1))
     (block $done
       (loop $next
         (local.set $b (call $near (i32.const 152) (i32.const 5) (local.get $dim) (local.get $x) (local.get $y) (local.get $r) (local.get $b)))
         (br_if $done (i64.lt_s (local.get $b) (i64.const 0)))
-        (br_if $done (i32.ge_u (global.get $ns) (global.get $MAXS)))
+        (if (i32.ge_u (global.get $ns) (global.get $cap))
+          (then
+            (br_if $done (i32.or (local.get $again) (i32.ne (global.get $cap) (global.get $MAXS))))
+            (local.set $again (i32.const 1))
+            (global.set $ns (global.get $arena_end))
+            (local.set $b (i64.const -1))
+            (br $next)))
         (local.set $k (call $shapekind (local.get $b)))
         (if (i32.and (i32.eqz (call $known (local.get $b))) (call $solidity (local.get $b) (local.get $k)))
           (then
@@ -1161,6 +1175,7 @@
     (global.set $n (i32.div_u (call $nums (global.get $me) (i32.const 128) (i32.const 6) (global.get $ROSTER) (i32.const 640)) (global.get $FIELDS)))
     (call $ammo)
     (global.set $ns (i32.const 0))
+    (global.set $arena_end (i32.const 0))
     (call $join)
     (call $arena)
     (block $done

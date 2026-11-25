@@ -229,6 +229,12 @@ fn writable(state: &mut HostState, handle: i32) -> Result<Cap, HostError> {
     if crate::pledge::of(&state.pledges, crate::pledge::Stake::Entity(cap.entity)).is_some() {
         return Err(HostError::Pledged(cap.entity.0));
     }
+    if let Some(Owner::Capsule(c)) = state.txn.entity(&state.world, cap.entity).map(|e| &e.owner)
+        && *c != state.capsule
+        && crate::pledge::of(&state.pledges, crate::pledge::Stake::Capsule(*c)).is_some()
+    {
+        return Err(HostError::Pledged(cap.entity.0));
+    }
     state.writes_left = state
         .writes_left
         .checked_sub(1)
@@ -544,6 +550,7 @@ pub(crate) fn linker(engine: &Engine) -> wasmtime::Result<Linker<HostState>> {
          -> wasmtime::Result<i32> {
             charge(&mut c, COST_WRITE)?;
             let to = deny(read_str(&mut c, tp, tl, MAX_TEXT_LEN))?;
+            deny(spend_write(c.data_mut()))?;
             Ok(award(c.data_mut(), kind, id, &to).map_or(-1, |()| 0))
         },
     )?;
@@ -553,6 +560,7 @@ pub(crate) fn linker(engine: &Engine) -> wasmtime::Result<Linker<HostState>> {
         "release",
         |mut c: Caller<'_, HostState>, kind: i32, id: i64| -> wasmtime::Result<i32> {
             charge(&mut c, COST_WRITE)?;
+            deny(spend_write(c.data_mut()))?;
             let s = c.data_mut();
             let Some(stake) = mine(s, kind, id) else {
                 return Ok(-1);
@@ -749,6 +757,11 @@ fn spawn(s: &mut HostState) -> Result<i32, HostError> {
     };
     let handle = claim_slot(&mut s.clist, cap, s.max_clist_len).ok_or(HostError::ClistFull)?;
     i32::try_from(handle).map_err(|_| HostError::ClistFull)
+}
+
+fn spend_write(s: &mut HostState) -> Result<(), HostError> {
+    s.writes_left = s.writes_left.checked_sub(1).ok_or(HostError::WriteBudget)?;
+    Ok(())
 }
 
 fn mine(s: &HostState, kind: i32, id: i64) -> Option<crate::pledge::Stake> {

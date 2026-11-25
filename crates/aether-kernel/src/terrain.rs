@@ -10,10 +10,14 @@ pub struct Terrain {
 
 const OCTAVES: u32 = 5;
 
-fn lattice(x: i64, y: i64, seed: u32, octave: u32) -> f64 {
+fn wrap(x: f64) -> u32 {
+    x.trunc().rem_euclid(4_294_967_296.0) as u32
+}
+
+fn lattice(x: f64, y: f64, seed: u32, octave: u32) -> f64 {
     let mut h = seed
-        ^ (x as u32).wrapping_mul(0x27d4_eb2d)
-        ^ (y as u32).wrapping_mul(0x1656_67b1)
+        ^ wrap(x).wrapping_mul(0x27d4_eb2d)
+        ^ wrap(y).wrapping_mul(0x1656_67b1)
         ^ octave.wrapping_mul(0x9e37_79b9);
     h ^= h >> 15;
     h = h.wrapping_mul(0x85eb_ca6b);
@@ -29,12 +33,11 @@ fn smooth(t: f64) -> f64 {
 
 fn noise(x: f64, y: f64, seed: u32, octave: u32) -> f64 {
     let (fx, fy) = (x.floor(), y.floor());
-    let (ix, iy) = (fx as i64, fy as i64);
     let (u, v) = (smooth(x - fx), smooth(y - fy));
-    let a = lattice(ix, iy, seed, octave);
-    let b = lattice(ix + 1, iy, seed, octave);
-    let c = lattice(ix, iy + 1, seed, octave);
-    let d = lattice(ix + 1, iy + 1, seed, octave);
+    let a = lattice(fx, fy, seed, octave);
+    let b = lattice(fx + 1.0, fy, seed, octave);
+    let c = lattice(fx, fy + 1.0, seed, octave);
+    let d = lattice(fx + 1.0, fy + 1.0, seed, octave);
     let top = a + (b - a) * u;
     let bottom = c + (d - c) * u;
     top + (bottom - top) * v

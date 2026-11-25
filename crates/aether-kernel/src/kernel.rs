@@ -17,7 +17,7 @@ use crate::runtime::{Runtime, TABLE_ELEMENTS, THREAD_STACK};
 use crate::signal::{Sender, Signal};
 
 const LOG_BYTES_PER_TICK: usize = 1024;
-pub const RULES: &str = "aether-rules/16";
+pub const RULES: &str = "aether-rules/17";
 pub const GUARANTEED_FUEL: u64 = 250_000;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -553,6 +553,11 @@ impl Kernel {
                     let e = world
                         .entity(grant.entity)
                         .ok_or_else(|| format!("entity {} does not exist", grant.entity.0))?;
+                    if grant.write
+                        && let Some(why) = self.frozen_entity(actor, grant.entity)
+                    {
+                        return Err(why);
+                    }
                     if grant.write && !self.may_modify(actor, &e.owner) {
                         return Err(format!(
                             "actor may not grant write access to entity {}",
@@ -619,6 +624,11 @@ impl Kernel {
                 let e = world
                     .entity(grant.entity)
                     .ok_or_else(|| format!("entity {} does not exist", grant.entity.0))?;
+                if grant.write
+                    && let Some(why) = self.frozen_entity(actor, grant.entity)
+                {
+                    return Err(why);
+                }
                 if grant.write && !self.may_modify(actor, &e.owner) {
                     return Err(format!(
                         "actor may not grant write access to entity {}",
@@ -910,10 +920,34 @@ impl Kernel {
                 self.state.signals.extend(host.emitted);
                 for (stake, winner) in host.settled {
                     self.state.pledges.retain(|p| p.stake != stake);
-                    if let (Stake::Capsule(c), Some(winner)) = (stake, winner)
-                        && let Some(staked) = self.state.capsules.get_mut(&c)
-                    {
-                        staked.installer = Actor::Player(winner);
+                    let Some(winner) = winner else { continue };
+                    let winner = Actor::Player(winner);
+                    let (won, kept_by) = match stake {
+                        Stake::Entity(e) => (BTreeSet::from([e]), None),
+                        Stake::Capsule(c) => {
+                            let owned = Owner::Capsule(c);
+                            let won = self
+                                .state
+                                .world
+                                .entities()
+                                .filter(|(_, e)| e.owner == owned)
+                                .map(|(id, _)| id)
+                                .collect();
+                            if let Some(staked) = self.state.capsules.get_mut(&c) {
+                                staked.installer = winner.clone();
+                            }
+                            (won, Some(c))
+                        }
+                    };
+                    for (cid, other) in self.state.capsules.iter_mut() {
+                        if Some(*cid) == kept_by || other.installer == winner {
+                            continue;
+                        }
+                        for slot in other.clist.iter_mut().skip(1) {
+                            if slot.is_some_and(|cap| cap.write && won.contains(&cap.entity)) {
+                                *slot = None;
+                            }
+                        }
                     }
                 }
                 touched.extend(
