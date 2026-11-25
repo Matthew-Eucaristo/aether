@@ -17,7 +17,7 @@ use crate::runtime::{Runtime, TABLE_ELEMENTS, THREAD_STACK};
 use crate::signal::{Sender, Signal};
 
 const LOG_BYTES_PER_TICK: usize = 1024;
-pub const RULES: &str = "aether-rules/17";
+pub const RULES: &str = "aether-rules/18";
 pub const GUARANTEED_FUEL: u64 = 250_000;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

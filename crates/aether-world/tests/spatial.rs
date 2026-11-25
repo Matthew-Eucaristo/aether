@@ -133,3 +133,40 @@ fn searches_are_bounded_by_the_largest_radius() {
     assert_eq!(world.near(0, 0.0, 0.0, 1e9), vec![near]);
     assert!(world.near(0, f64::NAN, 0.0, 10.0).is_empty());
 }
+
+#[test]
+fn large_parts_are_found_wherever_they_reach() {
+    let mut world = World::new();
+    let mut txn = world.begin();
+    let floor = txn.spawn(Owner::Region);
+    for (k, v) in [
+        ("pos.x", 300.0),
+        ("pos.y", 0.0),
+        ("scale.x", 400.0),
+        ("scale.y", 30.0),
+    ] {
+        txn.set(&world, floor, k, Value::Num(v)).unwrap();
+    }
+    let post = txn.spawn(Owner::Region);
+    for (k, v) in [
+        ("pos.x", 40.0),
+        ("pos.y", 0.0),
+        ("scale.x", 2.0),
+        ("scale.y", 2.0),
+    ] {
+        txn.set(&world, post, k, Value::Num(v)).unwrap();
+    }
+    world.commit(txn).unwrap();
+    world.settle();
+    assert_eq!(
+        world.near(0, 0.0, 0.0, 5.0),
+        vec![floor],
+        "a 400 m floor centred 300 m away reaches a point near the origin"
+    );
+    assert_eq!(
+        world.near(0, 0.0, 0.0, 39.0),
+        vec![floor, post],
+        "a small part counts by its size too"
+    );
+    assert_eq!(world.near(1, 0.0, 0.0, 5.0), Vec::<EntityId>::new());
+}

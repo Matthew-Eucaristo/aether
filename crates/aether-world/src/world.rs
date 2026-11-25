@@ -66,6 +66,13 @@ const PARALLEL_FROM: usize = 64;
 
 pub const CELL: f64 = 16.0;
 pub const MAX_RADIUS: f64 = 512.0;
+pub const MAX_REACH: f64 = 4096.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Slot {
+    Cell(Cell),
+    Wide(i64),
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct Cell {
@@ -79,6 +86,7 @@ pub struct Place {
     pub dim: i64,
     pub x: f64,
     pub y: f64,
+    pub reach: f64,
 }
 
 impl Place {
@@ -87,11 +95,24 @@ impl Place {
             Some(Value::Num(n)) => Some(*n),
             _ => None,
         };
+        let (sx, sy) = (
+            num("scale.x").unwrap_or(0.0).abs(),
+            num("scale.y").unwrap_or(0.0).abs(),
+        );
         Some(Place {
             dim: num("dim").map_or(0, |d| d as i64),
             x: num("pos.x")?,
             y: num("pos.y").unwrap_or(0.0),
+            reach: (sx * sx + sy * sy).sqrt().min(MAX_REACH),
         })
+    }
+
+    fn slot(self) -> Slot {
+        if self.reach > CELL {
+            Slot::Wide(self.dim)
+        } else {
+            Slot::Cell(self.cell())
+        }
     }
 
     fn cell(self) -> Cell {
@@ -104,7 +125,8 @@ impl Place {
 
     pub fn within(self, dim: i64, x: f64, y: f64, r: f64) -> bool {
         let (dx, dy) = (self.x - x, self.y - y);
-        self.dim == dim && dx * dx + dy * dy <= r * r
+        let reach = r + self.reach;
+        self.dim == dim && dx * dx + dy * dy <= reach * reach
     }
 }
 
@@ -115,6 +137,7 @@ struct Derived {
     by_key: BTreeMap<String, BTreeSet<EntityId>>,
     usage: BTreeMap<Owner, Usage>,
     cells: BTreeMap<Cell, BTreeSet<EntityId>>,
+    wide: BTreeMap<i64, BTreeSet<EntityId>>,
 }
 
 impl Derived {
@@ -149,21 +172,38 @@ impl Derived {
     }
 
     fn locate(&mut self, id: EntityId, old: Option<&Entity>, new: Option<&Entity>) {
-        let before = old.and_then(Place::of).map(Place::cell);
-        let after = new.and_then(Place::of).map(Place::cell);
+        let before = old.and_then(Place::of).map(Place::slot);
+        let after = new.and_then(Place::of).map(Place::slot);
         if before == after {
             return;
         }
-        if let Some(cell) = before
-            && let Some(ids) = self.cells.get_mut(&cell)
-        {
-            ids.remove(&id);
-            if ids.is_empty() {
-                self.cells.remove(&cell);
+        match before {
+            Some(Slot::Cell(cell)) => {
+                if let Some(ids) = self.cells.get_mut(&cell) {
+                    ids.remove(&id);
+                    if ids.is_empty() {
+                        self.cells.remove(&cell);
+                    }
+                }
             }
+            Some(Slot::Wide(dim)) => {
+                if let Some(ids) = self.wide.get_mut(&dim) {
+                    ids.remove(&id);
+                    if ids.is_empty() {
+                        self.wide.remove(&dim);
+                    }
+                }
+            }
+            None => {}
         }
-        if let Some(cell) = after {
-            self.cells.entry(cell).or_default().insert(id);
+        match after {
+            Some(Slot::Cell(cell)) => {
+                self.cells.entry(cell).or_default().insert(id);
+            }
+            Some(Slot::Wide(dim)) => {
+                self.wide.entry(dim).or_default().insert(id);
+            }
+            None => {}
         }
     }
 
@@ -311,20 +351,22 @@ impl World {
     }
 
     pub(crate) fn in_cells(&self, dim: i64, x: f64, y: f64, r: f64) -> Vec<EntityId> {
-        let r = r.clamp(0.0, MAX_RADIUS);
         if !(x.is_finite() && y.is_finite()) {
             return Vec::new();
         }
+        let r = r.clamp(0.0, MAX_RADIUS) + CELL;
         let lo = Place {
             dim,
             x: x - r,
             y: y - r,
+            reach: 0.0,
         }
         .cell();
         let hi = Place {
             dim,
             x: x + r,
             y: y + r,
+            reach: 0.0,
         }
         .cell();
         let mut ids = Vec::new();
@@ -343,6 +385,7 @@ impl World {
                 ids.extend(cell.iter().copied());
             }
         }
+        ids.extend(self.derived.wide.get(&dim).into_iter().flatten().copied());
         ids
     }
 

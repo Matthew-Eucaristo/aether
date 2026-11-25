@@ -677,3 +677,51 @@ fn bullets_only_hit_bodies_in_their_own_dimension() {
         "the same shots land once both stand in one dimension"
     );
 }
+
+#[test]
+fn a_long_wall_stops_bullets_far_from_its_centre() {
+    let Duel {
+        mut k,
+        realm,
+        ana,
+        budi,
+    } = duel();
+    spawn(
+        &mut k,
+        &[
+            ("shape", Value::Text("box".into())),
+            ("pos.x", Value::Num(90.0)),
+            ("pos.y", Value::Num(0.0)),
+            ("pos.z", Value::Num(2.0)),
+            ("scale.x", Value::Num(190.0)),
+            ("scale.y", Value::Num(0.4)),
+            ("scale.z", Value::Num(4.0)),
+        ],
+    );
+    step(
+        &mut k,
+        vec![
+            (Actor::Admin, set(ana, "pos.x", 0.0)),
+            (Actor::Admin, set(ana, "pos.y", 6.0)),
+            (Actor::Admin, set(budi, "pos.x", 0.0)),
+            (Actor::Admin, set(budi, "pos.y", -6.0)),
+        ],
+    );
+    install(&mut k, player("budi"), RIFLE, read(budi));
+    step(
+        &mut k,
+        vec![
+            (player("budi"), signal(budi, "ax", 0.0)),
+            (player("budi"), signal(budi, "ay", 1.0)),
+        ],
+    );
+    fire(&mut k, "budi", budi, 15);
+    for _ in 0..5 {
+        step(&mut k, vec![]);
+    }
+    assert_eq!(
+        entry(&k, realm, ana)[HEALTH],
+        100.0,
+        "the wall's far end still stops bullets"
+    );
+}
