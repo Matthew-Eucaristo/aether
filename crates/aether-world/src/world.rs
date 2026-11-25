@@ -66,7 +66,6 @@ const PARALLEL_FROM: usize = 64;
 
 pub const CELL: f64 = 16.0;
 pub const MAX_RADIUS: f64 = 512.0;
-pub const MAX_REACH: f64 = 4096.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Slot {
@@ -103,7 +102,7 @@ impl Place {
             dim: num("dim").map_or(0, |d| d as i64),
             x: num("pos.x")?,
             y: num("pos.y").unwrap_or(0.0),
-            reach: (sx * sx + sy * sy).sqrt().min(MAX_REACH),
+            reach: (sx * sx + sy * sy).sqrt(),
         })
     }
 

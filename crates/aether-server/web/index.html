@@ -1700,7 +1700,7 @@ function solids() {
     if (c.avatar ? id === play.avatar || (num(e, "dim") ?? 0) !== currentDim() : !(c.solid && "bool" in c.solid ? c.solid.bool : kind === 0)) continue;
     const size = num(e, "size") ?? 0.28, full = kind === 1 ? 1 : 0.5, d = kind === 1 ? size : size * 2;
     const R = rotation(orient(e, shape));
-    out.push({ kind, x: num(e, "pos.x"), y: num(e, "pos.y") ?? 0, z: num(e, "pos.z") ?? 0,
+    out.push({ kind, body: c.avatar ? id : undefined, x: num(e, "pos.x"), y: num(e, "pos.y") ?? 0, z: num(e, "pos.z") ?? 0,
       hx: Math.abs(num(e, "scale.x") ?? d) * full, hy: Math.abs(num(e, "scale.y") ?? d) * full, hz: Math.abs(num(e, "scale.z") ?? d) * full,
       u: [R[0][0], R[1][0], R[2][0]], v: [R[0][1], R[1][1], R[2][1]], w: [R[0][2], R[1][2], R[2][2]] });
   }
@@ -1727,8 +1727,15 @@ function collide(p, vz, list) {
       p[0] += push * (nx * s.u[0] + ny * s.v[0]); p[1] += push * (nx * s.u[1] + ny * s.v[1]);
     } else {
       const r = Math.max(s.hx, s.hy), d = Math.hypot(dx, dy);
-      if (d < r * 0.8 && feet >= top - 0.35 && vz <= 0) { ground = Math.max(ground, top + 0.9); continue; }
-      if (p[2] + 0.9 < bot || feet > top || d >= r + B || d < 1e-6) continue;
+      if (s.body === undefined && d < r * 0.8 && feet >= top - 0.35 && vz <= 0) { ground = Math.max(ground, top + 0.9); continue; }
+      if (p[2] + 0.9 < bot || feet > top || d >= r + B) continue;
+      if (s.body !== undefined) {
+        const nx = d < 1e-6 ? (play.avatar < s.body ? -1 : 1) : dx / d, ny = d < 1e-6 ? 0 : dy / d;
+        const push = Math.min(0.15, d < 1e-6 ? 0.35 : r + B - d);
+        p[0] += nx * push; p[1] += ny * push;
+        continue;
+      }
+      if (d < 1e-6) continue;
       const k = (r + B - d) / d;
       p[0] += dx * k; p[1] += dy * k;
     }

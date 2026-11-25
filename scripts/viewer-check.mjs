@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 
 const server = process.argv[2];
-const chrome = process.env.CHROME || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+const chrome = process.env.CHROME
+  || (process.platform === "darwin" ? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" : "google-chrome");
 if (!server) {
   console.error("usage: node scripts/viewer-check.mjs <path to aether-server>");
   process.exit(2);
@@ -14,15 +15,27 @@ if (!server) {
 const scratch = mkdtempSync(join(tmpdir(), "aether-viewer-"));
 const children = [];
 const cleanup = () => {
-  for (const c of children) c.kill("SIGKILL");
-  rmSync(scratch, { recursive: true, force: true });
+  for (const c of children) if (c.exitCode === null) c.kill("SIGKILL");
+  rmSync(scratch, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 };
 const fail = (why) => {
   console.error(`viewer check failed: ${why}`);
   cleanup();
   process.exit(1);
 };
+process.on("uncaughtException", (e) => fail(e.stack || String(e)));
+process.on("unhandledRejection", (e) => fail(e?.stack || String(e)));
 setTimeout(() => fail("timed out after 90 s"), 90_000).unref();
+function start(command, args, stdio) {
+  const child = spawn(command, args, { stdio });
+  child.on("error", (e) => fail(`cannot start ${command}: ${e.message}`));
+  child.on("exit", (code, signal) => {
+    if (!finished) fail(`${command} exited early (${signal || code})`);
+  });
+  children.push(child);
+  return child;
+}
+let finished = false;
 
 function lineMatching(stream, pattern) {
   return new Promise((resolve, reject) => {
@@ -35,13 +48,14 @@ function lineMatching(stream, pattern) {
   });
 }
 
-const srv = spawn(server, [join(scratch, "world"), "0"], { stdio: ["ignore", "pipe", "inherit"] });
-children.push(srv);
+const srv = start(server, [join(scratch, "world"), "0"], ["ignore", "pipe", "pipe"]);
+srv.stderr.resume();
 const [, port, token] = await lineMatching(srv.stdout, /admin:\s+http:\/\/127\.0\.0\.1:(\d+)\/\?token=(\w+)/);
 const base = `http://127.0.0.1:${port}`;
 
-const browser = spawn(chrome, [
+const browser = start(chrome, [
   "--headless=new",
+  ...(process.env.CI ? ["--no-sandbox"] : []),
   "--remote-debugging-port=0",
   `--user-data-dir=${join(scratch, "chrome")}`,
   "--use-angle=swiftshader",
@@ -49,8 +63,7 @@ const browser = spawn(chrome, [
   "--window-size=1200,800",
   "--no-first-run",
   "about:blank",
-], { stdio: ["ignore", "ignore", "pipe"] });
-children.push(browser);
+], ["ignore", "ignore", "pipe"]);
 const [, devtools] = await lineMatching(browser.stderr, /DevTools listening on (ws:\/\/\S+)/);
 
 const ws = new WebSocket(devtools);
@@ -136,5 +149,6 @@ if (played !== "ok") fail(played);
 await sleep(500);
 if (problems.length) fail(problems.join("\n"));
 console.log("viewer check passed: loaded, joined, walked and changed dimension without page errors");
+finished = true;
 cleanup();
 process.exit(0);

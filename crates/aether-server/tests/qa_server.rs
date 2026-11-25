@@ -786,3 +786,190 @@ fn focus_dimension_updates_drop_and_restore_positioned_entities() {
         "after focusing dimension 5 the probe is sent again"
     );
 }
+
+#[test]
+fn a_player_cannot_forge_another_players_body_marker() {
+    let server = fresh_server("bodymarker");
+    let mut attacker = Ws::connect(server.port, "player=attacker").unwrap();
+    attacker.recv_json().unwrap();
+    attacker
+        .send_text(
+            r#"{"type":"act","action":{"op":"spawn","components":{"avatar":{"bool":true},"player":{"text":"player:victim"},"pos.x":{"num":1000},"pos.y":{"num":0},"dim":{"num":999},"secret":{"text":"hidden"}}}}"#,
+        )
+        .unwrap();
+    let mut fake = None;
+    for _ in 0..20 {
+        let tick = attacker.wait_tick();
+        let inputs = tick["inputs"].as_array().unwrap();
+        let outcomes = tick["report"]["inputs"].as_array().unwrap();
+        for (inp, out) in inputs.iter().zip(outcomes.iter()) {
+            if inp["actor"] == serde_json::json!({"player":"attacker"})
+                && inp["action"]["op"] == "spawn"
+            {
+                fake = out["spawned"].as_u64();
+            }
+        }
+        if fake.is_some() {
+            break;
+        }
+    }
+    let fake = fake.expect("attacker's spoofed body spawn outcome");
+    let mut victim = Ws::connect(server.port, "player=victim").unwrap();
+    let hello = victim.recv_json().unwrap();
+    let entity = &hello["state"]["world"]["entities"][fake.to_string()];
+    assert!(
+        entity.is_null(),
+        "victim must not receive attacker's hidden dimension entity just because it says player:victim; got {entity}"
+    );
+}
+
+#[test]
+fn resync_after_a_full_outbox_still_includes_the_player_body() {
+    let server = fresh_server("resyncbody");
+    let mut admin = Ws::connect(server.port, &format!("token={}", server.token)).unwrap();
+    let admin_hello = admin.recv_json().unwrap();
+
+    let mut components = serde_json::Map::new();
+    components.insert("pos.x".into(), serde_json::json!({"num": 0}));
+    components.insert("pos.y".into(), serde_json::json!({"num": 0}));
+    for i in 0..60 {
+        components.insert(
+            format!("pad{i:02}"),
+            serde_json::json!({"text": "x".repeat(4000)}),
+        );
+    }
+    let spawn_msg = serde_json::json!({
+        "type":"act",
+        "action":{"op":"spawn","components":components}
+    })
+    .to_string();
+    admin.send_text(&spawn_msg).unwrap();
+    let mut pad_entity = None;
+    for _ in 0..20 {
+        let tick = admin.wait_tick();
+        for out in tick["report"]["inputs"].as_array().unwrap() {
+            if let Some(id) = out["spawned"].as_u64() {
+                pad_entity = Some(id);
+            }
+        }
+        if pad_entity.is_some() {
+            break;
+        }
+    }
+    let pad_entity = pad_entity.expect("large padded entity spawn outcome");
+
+    admin
+        .send_text(
+            &serde_json::json!({
+                "type":"upload",
+                "id":1,
+                "source":include_str!("../../../capsules/realm.wat")
+            })
+            .to_string(),
+        )
+        .unwrap();
+    let mut wasm = None;
+    for _ in 0..30 {
+        let msg = admin.recv_json().unwrap();
+        if msg["type"] == "uploaded" && msg["id"] == 1 {
+            wasm = msg["result"]["Ok"].as_str().map(str::to_owned);
+            break;
+        }
+    }
+    let wasm = wasm.expect("realm upload succeeds");
+    let budget = admin_hello["state"]["law"]["ceiling"].clone();
+    admin
+        .send_text(
+            &serde_json::json!({
+                "type":"act",
+                "action":{"op":"install","wasm":wasm,"grants":[],"budget":budget}
+            })
+            .to_string(),
+        )
+        .unwrap();
+    let mut hub = None;
+    for _ in 0..30 {
+        let tick = admin.wait_tick();
+        if tick["capsules"].as_object().is_some_and(|c| !c.is_empty()) {
+            hub = tick["capsules"]
+                .as_object()
+                .and_then(|c| c.values().next())
+                .and_then(|c| c["self_entity"].as_u64());
+        }
+        if hub.is_some() {
+            break;
+        }
+    }
+    let hub = hub.expect("realm capsule appears");
+
+    let mut victim = Ws::connect(server.port, "player=victim").unwrap();
+    let first = victim.recv_json().unwrap();
+    assert_eq!(first["type"], "hello");
+    victim
+        .send_text(
+            &serde_json::json!({
+                "type":"act",
+                "action":{"op":"signal","entity":hub,"name":"join","value":0}
+            })
+            .to_string(),
+        )
+        .unwrap();
+    let mut body = None;
+    for _ in 0..30 {
+        let tick = victim.wait_tick();
+        for (id, entity) in tick["changed"].as_object().unwrap() {
+            if entity["components"]["player"]["text"] == "player:victim" {
+                body = id.parse::<u64>().ok();
+            }
+        }
+        if body.is_some() {
+            break;
+        }
+    }
+    let body = body.expect("realm body reaches its player before the outage");
+
+    admin
+        .send_text(r#"{"type":"focus","dim":999,"x":1000000,"y":0}"#)
+        .unwrap();
+    for round in 0..80 {
+        let pad = format!("{round:04}{}", "y".repeat(3996));
+        let msg = serde_json::json!({
+            "type":"act",
+            "action":{"op":"set","entity":pad_entity,"key":"pad00","value":{"text":pad}}
+        })
+        .to_string();
+        admin.send_text(&msg).unwrap();
+        loop {
+            let tick = admin.wait_tick();
+            let saw = tick["inputs"].as_array().unwrap().iter().any(|input| {
+                input["actor"] == serde_json::json!("admin")
+                    && input["action"]["op"] == "set"
+                    && input["action"]["entity"] == pad_entity
+                    && input["action"]["key"] == "pad00"
+                    && input["action"]["value"]["text"] == pad
+            });
+            if saw {
+                break;
+            }
+        }
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut frames = 0;
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "no resync hello after outbox recovery"
+        );
+        let msg = victim.recv_json().expect("victim drains backed-up frames");
+        frames += 1;
+        if msg["type"] == "hello" {
+            assert!(
+                msg["state"]["world"]["entities"][body.to_string()].is_object(),
+                "resync hello after {frames} frames omits the player body"
+            );
+            println!("resync hello after {frames} queued frames includes body {body}");
+            break;
+        }
+    }
+}

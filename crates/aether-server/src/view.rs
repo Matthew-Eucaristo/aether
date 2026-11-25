@@ -177,10 +177,20 @@ fn visible(k: &Kernel, viewer: &Viewer) -> BTreeSet<EntityId> {
         .collect();
     if let Actor::Player(p) = &viewer.actor {
         let label = Value::Text(format!("player:{}", p.0));
+        let realm_made = |e: &aether_world::Entity| match &e.owner {
+            aether_world::Owner::Capsule(c) => k.state().capsules.get(c).is_some_and(|c| {
+                k.world()
+                    .entity(c.self_entity)
+                    .is_some_and(|me| me.components.get("realm") == Some(&Value::Bool(true)))
+            }),
+            _ => false,
+        };
         seen.extend(k.world().having("player").filter(|id| {
-            k.world()
-                .entity(*id)
-                .is_some_and(|e| e.components.get("player") == Some(&label))
+            k.world().entity(*id).is_some_and(|e| {
+                e.components.get("player") == Some(&label)
+                    && e.components.get("avatar") == Some(&Value::Bool(true))
+                    && realm_made(e)
+            })
         }));
     }
     seen
